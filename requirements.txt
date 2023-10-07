@@ -1,0 +1,3 @@
+git+https://github.com/CFSession/CFSession.git@1db7004dd77973420bbb52aae3d0ceb639ab2a48
+flask
+bs4
