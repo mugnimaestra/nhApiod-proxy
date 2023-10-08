@@ -1,5 +1,5 @@
 from flask import Flask, jsonify, request, Response
-from CFSession import cfSession, cfDirectory
+from CFSession import cfSession, cfDirectory, Options
 from CFSession import cf
 import threading
 import os
@@ -34,7 +34,7 @@ class Renewer():
         "False if renewal has not started otherwise True with reason why it started"
         cookie_invalid = False
         if self.renewing:
-            return {"status": False, "reason": "Is already renewing"}
+            return {"status": False, "reason": "Renew process undergoing, please be patient"}
         cookie_availability = session.internalHandler.cookie_available()
 
         cookie_status = cookie_availability[0]
@@ -46,7 +46,7 @@ class Renewer():
             cookie_invalid = True
         self._thread = threading.Thread(target=self._renew_backend, args=(session,))
         self._thread.start() 
-        return {"status": True, "reason": cookie_reason[1] if (cookie_invalid) else "Cookie will be created soon"}
+        return {"status": True, "reason": cookie_reason if (cookie_invalid) else "Cookies will be created soon"}
 
 def json_resp(jsondict, status=200):
     resp = jsonify(jsondict)
@@ -85,6 +85,8 @@ def getdata():
         code = int(request.args['id'])
     except ValueError:
         return json_resp({"status": False, "reason": "Invalid code"})
+    except TypeError:
+        return json_resp({"status": False, "reason": "Code not specified"})
     res = session.get(f'{WEB_TARGET}/g/{code}')
     json_api = get_json_web(res)
     if not json_api.get("isDone"):
@@ -105,6 +107,6 @@ def notFound(e):
     return json_resp({"code": 404, "status": "You are lost"}, status=404)
 
 if __name__ == "__main__":
-    session = cfSession(directory=cfDirectory(CACHE_DIR))
+    session = cfSession(directory=cfDirectory(CACHE_DIR), headless_mode=True)
     renewer = Renewer(target=WEB_TARGET)
     app.run("0.0.0.0",port=3010)
