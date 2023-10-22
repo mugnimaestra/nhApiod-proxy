@@ -1,0 +1,10 @@
+{
+  "main":{
+    "semaphore":10,
+    "Api": {
+      "module_name": "nhApiod",
+      "cf_bypass": false,
+      "mirror_available": false 
+    }
+  }
+}

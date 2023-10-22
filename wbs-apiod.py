@@ -1,6 +1,7 @@
 from flask import Flask, jsonify, request, Response
 from CFSession import cfSession, cfDirectory, Options
 from CFSession import cf
+import requests
 import threading
 import os
 from typing import Union, Dict
@@ -35,18 +36,17 @@ class Renewer():
         cookie_invalid = False
         if self.renewing:
             return {"status": False, "reason": "Renew process undergoing, please be patient"}
-        cookie_availability = session.internalHandler.cookie_available()
+        response = requests.get("url")
+        cookie_availability = response.status_code == 200
 
-        cookie_status = cookie_availability[0]
-        cookie_reason = cookie_availability[1]
-        print(cookie_reason)
+        cookie_status = cookie_availability
         if cookie_status:
             return {"status": False, "reason": "Cookie is valid"}
         else:
             cookie_invalid = True
         self._thread = threading.Thread(target=self._renew_backend, args=(session,))
         self._thread.start() 
-        return {"status": True, "reason": cookie_reason if (cookie_invalid) else "Cookies will be created soon"}
+        return {"status": True, "reason": "Cookie was invalid, recreating..." if (cookie_invalid) else "Cookies will be created soon"}
 
 def json_resp(jsondict, status=200):
     resp = jsonify(jsondict)
@@ -59,6 +59,10 @@ def conditioner(func):
         done = jsonned.get("status")
         return {"status_code": status,"isDone": done,"json": jsonned}
     return wrapper
+
+def isSiteValid(url):
+    response = requests.get("url")
+    return response.status_code == 200
 
 @conditioner
 def get_json_web(response) -> Union[None, Dict]:
@@ -79,7 +83,7 @@ def getmain():
 
 @app.route("/get",methods=["GET"])
 def getdata():
-    if not session.internalHandler.cookie_check_expire():
+    if not isSiteValid(WEB_TARGET):
         return json_resp({"status": False, "reason": "Server cookies outdated, do /getcookie to initiate renewal"}, status="403")
     try:
         code = int(request.args['id'])
