@@ -61,7 +61,7 @@ def conditioner(func):
     return wrapper
 
 def isSiteValid(url):
-    response = requests.get("url")
+    response = requests.get(url)
     return response.status_code == 200
 
 @conditioner
