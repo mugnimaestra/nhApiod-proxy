@@ -23,7 +23,7 @@ API_ENDPOINTS = {
   "refresh": "/getcookie",
   "fetch": "/get?id={}"
 }
-BASE_URL = "https://nhapi.kinuseka.us"
+BASE_URL = "https://nhapi.hokai.lol"
 
 #Optional
 def CheckLink(data, digit=False):
