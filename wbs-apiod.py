@@ -1,7 +1,6 @@
 from flask import Flask, jsonify, request, Response
 from CFSession import cfSession, cfDirectory, Options
 from CFSession import cf
-import requests
 import threading
 import os
 from typing import Union, Dict
@@ -36,7 +35,7 @@ class Renewer():
         cookie_invalid = False
         if self.renewing:
             return {"status": False, "reason": "Renew process undergoing, please be patient"}
-        response = requests.get("url")
+        response = session.session.get(self.target)
         cookie_availability = response.status_code == 200
 
         cookie_status = cookie_availability
@@ -61,7 +60,7 @@ def conditioner(func):
     return wrapper
 
 def isSiteValid(url):
-    response = requests.get(url)
+    response = session.session.get(url)
     return response.status_code == 200
 
 @conditioner
