@@ -26,6 +26,18 @@ CACHE_DIR = os.path.join(os.getcwd(),"cache")
 WEB_TARGET = "https://nhentai.net"
 app = Flask(__name__)
 
+# Initialize session and cookie manager
+try:
+    session = cfSession(directory=cfDirectory(CACHE_DIR), headless_mode=True)
+    cookie_manager = CookieManager(session, WEB_TARGET)
+    
+    # Initial cookie setup
+    if not cookie_manager.ensure_valid_cookies():
+        logger.warning("Initial cookie setup failed, will retry on requests")
+except Exception as e:
+    logger.error(f"Application initialization failed: {str(e)}")
+    raise
+
 class CookieManager:
     def __init__(self, session: cfSession, target: str):
         self.session = session
