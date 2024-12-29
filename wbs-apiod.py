@@ -157,17 +157,5 @@ def notFound(e):
     return json_resp({"code": 404, "status": "You are lost"}, status=404)
 
 if __name__ == "__main__":
-    try:
-        session = cfSession(directory=cfDirectory(CACHE_DIR), headless_mode=True)
-        cookie_manager = CookieManager(session, WEB_TARGET)
-        
-        # Initial cookie setup
-        if not cookie_manager.ensure_valid_cookies():
-            logger.warning("Initial cookie setup failed, will retry on requests")
-            
-    except Exception as e:
-        logger.error(f"Application initialization failed: {str(e)}")
-        raise
-
-    logger.info("API server starting on port 5000")
-    app.run("0.0.0.0", port=5000)
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port)
