@@ -7,45 +7,75 @@ from typing import Union, Dict
 from bs4 import BeautifulSoup
 import re
 import json
+import logging
+import urllib3
+import requests
+import time
+
+# Configure logging for production
+logging.basicConfig(
+    level=logging.INFO,  # Changed from DEBUG to INFO
+    format='%(asctime)s - %(levelname)s - %(message)s'  # Simplified format
+)
+logger = logging.getLogger(__name__)
+
+# Disable SSL verification warnings
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 CACHE_DIR = os.path.join(os.getcwd(),"cache")
 WEB_TARGET = "https://nhentai.net"
 app = Flask(__name__)
-class Renewer():
-    def __init__(self,target: str):
-        """Cookie renewer
-        session: A valid cfSession
-        target: Website url
-        """
-        self.renewing = False
-        self.target = target
-        self._thread = None
-    def _renew_backend(self,session: cfSession):
-        self.renewing = True
-        try:
-            resp = session.get(self.target)
-            print(resp.status_code)
-        except Exception as e:
-            print(e)
-        finally:
-            self.renewing = False
-    
-    def renew(self, session: cfSession):
-        "False if renewal has not started otherwise True with reason why it started"
-        cookie_invalid = False
-        if self.renewing:
-            return {"status": False, "reason": "Renew process undergoing, please be patient"}
-        response = session.session.get(self.target)
-        cookie_availability = response.status_code == 200
 
-        cookie_status = cookie_availability
-        if cookie_status:
-            return {"status": False, "reason": "Cookie is valid"}
-        else:
-            cookie_invalid = True
-        self._thread = threading.Thread(target=self._renew_backend, args=(session,))
-        self._thread.start() 
-        return {"status": True, "reason": "Cookie was invalid, recreating..." if (cookie_invalid) else "Cookies will be created soon"}
+class CookieManager:
+    def __init__(self, session: cfSession, target: str):
+        self.session = session
+        self.target = target
+        self.last_renewal = 0
+        self.renewal_interval = 60  # Renew every 60 seconds
+        self.lock = threading.Lock()
+        self._renewing = False
+        
+    def ensure_valid_cookies(self) -> bool:
+        """Ensures cookies are valid, renews if necessary"""
+        with self.lock:
+            current_time = time.time()
+            
+            if self._renewing:
+                time.sleep(2)
+                return True
+            
+            if current_time - self.last_renewal > self.renewal_interval:
+                return self._renew_cookies()
+            
+            try:
+                response = self.session.session.get(self.target, verify=False)
+                if response.status_code != 200:
+                    return self._renew_cookies()
+                return True
+            except Exception as e:
+                logger.error(f"Cookie validation failed: {str(e)}")
+                return self._renew_cookies()
+    
+    def _renew_cookies(self) -> bool:
+        """Internal method to handle cookie renewal"""
+        if self._renewing:
+            return True
+            
+        self._renewing = True
+        try:
+            response = self.session.get(self.target, verify=False)
+            success = response.status_code == 200
+            if success:
+                self.last_renewal = time.time()
+                logger.info("Cookie renewal completed")
+            else:
+                logger.error(f"Cookie renewal failed: status {response.status_code}")
+            return success
+        except Exception as e:
+            logger.error(f"Cookie renewal error: {str(e)}")
+            return False
+        finally:
+            self._renewing = False
 
 def json_resp(jsondict, status=200):
     resp = jsonify(jsondict)
@@ -60,21 +90,28 @@ def conditioner(func):
     return wrapper
 
 def isSiteValid(url):
-    response = session.session.get(url)
-    return response.status_code == 200
+    try:
+        response = session.session.get(url, verify=False)
+        return response.status_code == 200
+    except Exception:
+        return False
 
 @conditioner
 def get_json_web(response) -> Union[None, Dict]:
     if response.status_code != 200:
-        return ({"status": False, "reason": "Error, backend returned %s" % response.status_code}, response.status_code)
+        return ({"status": False, "reason": f"Error, backend returned {response.status_code}"}, response.status_code)
     elif response.status_code == 404:
         return ({"status": False, "reason": "Error, cannot find what you're looking for"}, response.status_code)
-    page = response.content
-    soup = BeautifulSoup(page, "html.parser")
-    json_regex = r'JSON\.parse\("(.*?)"\)'
-    script = re.search(json_regex, (soup.find_all("script")[2].contents[0]).strip()).group(1).encode("utf-8").decode("unicode-escape")
-    #IF THERE IS NO ERROR THEN PROCEED
-    return (json.loads(script), 200)
+    
+    try:
+        page = response.content
+        soup = BeautifulSoup(page, "html.parser")
+        json_regex = r'JSON\.parse\("(.*?)"\)'
+        script = re.search(json_regex, (soup.find_all("script")[2].contents[0]).strip()).group(1).encode("utf-8").decode("unicode-escape")
+        return (json.loads(script), 200)
+    except Exception as e:
+        logger.error(f"JSON extraction failed: {str(e)}")
+        return ({"status": False, "reason": f"Error processing data: {str(e)}"}, 500)
 
 @app.route("/",methods=["GET"])
 def getmain():
@@ -82,34 +119,55 @@ def getmain():
 
 @app.route("/get",methods=["GET"])
 def getdata():
-    if not isSiteValid(WEB_TARGET):
-        return json_resp({"status": False, "reason": "Server cookies outdated, do /getcookie to initiate renewal"}, status="403")
+    if not cookie_manager.ensure_valid_cookies():
+        return json_resp({"status": False, "reason": "Failed to establish valid connection"}, status=500)
+    
     try:
         code = int(request.args['id'])
     except ValueError:
         return json_resp({"status": False, "reason": "Invalid code"})
     except TypeError:
         return json_resp({"status": False, "reason": "Code not specified"})
-    res = session.get(f'{WEB_TARGET}/g/{code}')
-    json_api = get_json_web(res)
-    if not json_api.get("isDone"):
-        return json_resp(json_api['json'],status=json_api["status_code"])
-    return json_resp(json_api, status=200)
-    #return Response(res.content, status=int(res.status_code))
-
-@app.route("/getcookie",methods=["GET"])
-def getcookie():
-    renew_resp = renewer.renew(session)
-    if not renew_resp["status"]: 
-        return json_resp(renew_resp, status=403)
-    else: 
-        return json_resp(renew_resp, status=200)
+    
+    # Retry logic for gallery fetch
+    max_retries = 2
+    for attempt in range(max_retries):
+        try:
+            res = session.get(f'{WEB_TARGET}/g/{code}', verify=False)
+            
+            if res.status_code == 403 and attempt < max_retries - 1:
+                cookie_manager.ensure_valid_cookies()
+                continue
+                    
+            json_api = get_json_web(res)
+            if not json_api.get("isDone"):
+                return json_resp(json_api['json'], status=json_api["status_code"])
+            return json_resp(json_api, status=200)
+            
+        except Exception as e:
+            if attempt < max_retries - 1:
+                continue
+            logger.error(f"Gallery fetch failed for ID {code}: {str(e)}")
+            return json_resp({"status": False, "reason": f"Error: {str(e)}"}, status=500)
+    
+    return json_resp({"status": False, "reason": "Maximum retries exceeded"}, status=500)
 
 @app.errorhandler(404)
 def notFound(e):
     return json_resp({"code": 404, "status": "You are lost"}, status=404)
 
 if __name__ == "__main__":
-    session = cfSession(directory=cfDirectory(CACHE_DIR), headless_mode=True)
-    renewer = Renewer(target=WEB_TARGET)
-    app.run("0.0.0.0",port=3010)
+    try:
+        session = cfSession(directory=cfDirectory(CACHE_DIR), headless_mode=True)
+        cookie_manager = CookieManager(session, WEB_TARGET)
+        
+        # Initial cookie setup
+        if not cookie_manager.ensure_valid_cookies():
+            logger.warning("Initial cookie setup failed, will retry on requests")
+            
+    except Exception as e:
+        logger.error(f"Application initialization failed: {str(e)}")
+        raise
+
+    logger.info("API server starting on port 5000")
+    app.run("0.0.0.0", port=5000)
