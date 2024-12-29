@@ -1,10 +1,10 @@
 services:
   - type: web
     name: nhApiod-proxy
-    env: python
-    buildCommand: pip install -r requirements.txt
-    startCommand: gunicorn wbs-apiod:app
+    env: docker
+    dockerfilePath: ./Dockerfile
+    autoDeploy: true
+    healthCheckPath: /
     envVars:
-      - key: PYTHON_VERSION
-        value: 3.9.0
-    autoDeploy: true 
+      - key: PORT
+        value: 10000 
