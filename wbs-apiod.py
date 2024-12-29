@@ -34,7 +34,7 @@ REQUEST_DELAY = 0.1  # 100ms delay between requests in the same thread
 
 # Add these constants with the others
 GALLERY_CACHE_DIR = os.path.join(os.getcwd(), "gallery_cache")
-CACHE_DURATION = 60 * 60 * 24 * 7  # 7 days in seconds
+CACHE_DURATION = 60 * 60 * 24  # 24 hours in seconds
 
 class CookieManager:
     def __init__(self, session: cfSession, target: str):
