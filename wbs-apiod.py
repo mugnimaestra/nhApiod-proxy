@@ -129,6 +129,26 @@ def get_json_web(response) -> Union[None, Dict]:
 def getmain():
     return json_resp({"status": False, "reason": "Invalid path"}, status=404)
 
+@app.route("/health-check", methods=["GET"])
+def health_check():
+    try:
+        # Check if cookie manager is initialized and working
+        cookies_ok = cookie_manager.ensure_valid_cookies()
+        return json_resp({
+            "status": True,
+            "service": "nhApiod-proxy",
+            "timestamp": time.time(),
+            "cookies_ok": cookies_ok
+        })
+    except Exception as e:
+        logger.error(f"Health check failed: {str(e)}")
+        return json_resp({
+            "status": False,
+            "service": "nhApiod-proxy",
+            "timestamp": time.time(),
+            "error": str(e)
+        }, status=500)
+
 @app.route("/get",methods=["GET"])
 def getdata():
     if not cookie_manager.ensure_valid_cookies():
