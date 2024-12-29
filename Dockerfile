@@ -4,6 +4,7 @@ FROM python:3.9-slim
 RUN apt-get update && apt-get install -y \
     chromium \
     chromium-driver \
+    xvfb \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -23,8 +24,13 @@ ENV CHROME_BIN=/usr/bin/chromium
 ENV CHROME_PATH=/usr/lib/chromium/
 ENV CHROME_DRIVER_PATH=/usr/bin/chromedriver
 ENV NO_SANDBOX=true
+ENV DISPLAY=:99
+
+# Add a non-root user
+RUN useradd -m myuser && chown -R myuser:myuser /app
+USER myuser
 
 EXPOSE $PORT
 
 # Use gunicorn with proper settings for production
-CMD gunicorn --bind 0.0.0.0:$PORT --workers 2 --threads 4 --timeout 120 wbs-apiod:app 
+CMD xvfb-run --server-args="-screen 0 1280x1024x24" gunicorn --bind 0.0.0.0:$PORT --workers 2 --threads 4 --timeout 120 wbs-apiod:app 
