@@ -27,8 +27,8 @@ if os.path.exists('.env'):
 
 # Configure logging for production
 logging.basicConfig(
-    level=logging.DEBUG,  # Changed from INFO to DEBUG for testing
-    format='%(asctime)s - %(levelname)s - [%(funcName)s] %(message)s'  # Added function name to format
+    level=logging.INFO,  # Changed back to INFO for production
+    format='%(asctime)s - %(levelname)s - %(message)s'  # Simplified format
 )
 logger = logging.getLogger(__name__)
 
@@ -166,37 +166,30 @@ def download_image(url: str, session: cfSession) -> bytes:
     
     while retry_count < max_retries:
         try:
-            logger.debug(f"Attempt {retry_count + 1}/{max_retries} to download image from: {url}")
-            
             response = session.get(url, verify=False, timeout=10)
-            logger.debug(f"Download response status: {response.status_code}")
-            logger.debug(f"Response headers: {dict(response.headers)}")
             
             if response.status_code == 403:
                 retry_count += 1
                 if retry_count < max_retries:
-                    logger.info(f"Got 403, waiting before retry...")
-                    # Try to renew cookies
+                    logger.info(f"Got 403, retrying download...")
                     response = session.get(WEB_TARGET, verify=False, timeout=10)
-                    time.sleep(2)  # Longer delay between retries
+                    time.sleep(2)
                     continue
                 else:
-                    logger.error(f"Failed to download image after {max_retries} attempts: {url}")
+                    logger.error(f"Failed to download image after {max_retries} attempts")
                     return None
             
             if response.status_code != 200:
-                logger.error(f"Failed to download image {url}: {response.status_code}")
+                logger.error(f"Failed to download image: status {response.status_code}")
                 return None
                 
-            content = response.content
-            logger.debug(f"Successfully downloaded image, size: {len(content)} bytes")
-            return content
+            return response.content
             
         except Exception as e:
-            logger.error(f"Failed to download image: {str(e)}", exc_info=True)
+            logger.error(f"Download error: {str(e)}")
             retry_count += 1
             if retry_count < max_retries:
-                time.sleep(2)  # Longer delay between retries
+                time.sleep(2)
                 continue
             return None
     
@@ -285,49 +278,38 @@ def get_json_web(html_content: str) -> Dict:
 def process_gallery_images(data: Dict, gallery_id: str) -> Dict:
     """Process gallery images and create PDF if R2 is available"""
     try:
-        logger.debug(f"Starting to process gallery images for gallery_id: {gallery_id}")
-        logger.debug(f"R2 client initialized: {r2_client is not None}")
+        logger.info(f"Processing gallery {gallery_id}")
         
         # Process cover image if exists
         if 'images' in data and 'cover' in data['images']:
-            logger.debug("Processing cover image")
             cover = data['images']['cover']
             if 'url' in cover:
                 original_url = cover.get('url', '')
                 if original_url.startswith('https://t'):
-                    new_url = original_url.replace('//t', '//i', 1)
-                    logger.debug(f"Converting cover URL from {original_url} to {new_url}")
-                    cover['url'] = new_url
+                    cover['url'] = original_url.replace('//t', '//i', 1)
                 if r2_client:
                     cover['cdn_url'] = get_cdn_url(cover['url'], gallery_id)
-                    logger.debug(f"Generated CDN URL for cover: {cover['cdn_url']}")
-                else:
-                    cover['url'] = cover.get('url', '')
         
         # Process all page images
         if 'images' in data and 'pages' in data['images']:
-            logger.debug(f"Processing {len(data['images']['pages'])} pages")
+            total_pages = len(data['images']['pages'])
+            logger.info(f"Processing {total_pages} pages")
+            
             # If R2 is available, test first page download
             if r2_client:
                 try:
-                    # Create a single CFSession for testing
                     cf_session = cfSession(directory=cfDirectory(CACHE_DIR), headless_mode=True)
-                    # Initialize session with a request to the main site
-                    logger.debug("Initializing CFSession with main site request")
                     cf_session.get(WEB_TARGET, verify=False, timeout=10)
                     
                     # Test download of first page
                     first_page = data['images']['pages'][0]
                     if 'url' in first_page:
                         url = first_page['url']
-                        logger.debug(f"Testing download of first page: {url}")
-                        # Convert URL if needed
                         if url.startswith('https://t'):
                             url = url.replace('//t', '//i', 1)
-                            logger.debug(f"Using converted URL for download: {url}")
                         img_bytes = download_image(url, cf_session)
                         if not img_bytes:
-                            logger.error("Failed to download first page, skipping PDF creation")
+                            logger.error("Failed to download first page")
                             data['pdf_error'] = "Failed to download test page"
                             # Process CDN URLs and return early
                             for page in data['images']['pages']:
@@ -338,43 +320,33 @@ def process_gallery_images(data: Dict, gallery_id: str) -> Dict:
                                         page['thumbnail_cdn'] = get_cdn_url(page['thumbnail'], gallery_id)
                             return data
                         
-                        logger.info("Successfully downloaded test page, proceeding with full processing")
-                        # Continue with normal processing...
-                        image_bytes = [img_bytes]  # Start with our test page
+                        logger.info("First page download successful")
+                        image_bytes = [img_bytes]
                         failed_pages = []
                         
                         # Process remaining pages
-                        for i, page in enumerate(data['images']['pages'][1:], 2):  # Start from second page
-                            logger.debug(f"Processing page {i}/{len(data['images']['pages'])}")
+                        for i, page in enumerate(data['images']['pages'][1:], 2):
                             if 'url' in page:
                                 url = page['url']
                                 if url.startswith('https://t'):
                                     url = url.replace('//t', '//i', 1)
-                                logger.debug(f"Downloading image from URL: {url}")
                                 img_bytes = download_image(url, cf_session)
                                 if img_bytes:
                                     image_bytes.append(img_bytes)
-                                    logger.debug(f"Successfully downloaded page {i}")
                                 else:
                                     logger.error(f"Failed to download page {i}")
                                     failed_pages.append(i)
-                            
-                            # Add a longer delay between downloads
                             time.sleep(2)
                         
-                        logger.debug(f"Successfully downloaded {len(image_bytes)} images out of {len(data['images']['pages'])} pages")
                         if failed_pages:
                             logger.warning(f"Failed to download pages: {failed_pages}")
                             data['failed_pages'] = failed_pages
                         
                         if image_bytes:
-                            # Create PDF
-                            logger.debug("Creating PDF from downloaded images")
+                            logger.info("Creating PDF")
                             pdf_bytes = create_pdf_from_images(image_bytes, gallery_id)
                             if pdf_bytes:
-                                # Upload PDF to R2
                                 pdf_key = f"galleries/{gallery_id}/full.pdf"
-                                logger.debug(f"Uploading PDF to R2 with key: {pdf_key}")
                                 try:
                                     r2_client.put_object(
                                         Bucket=R2_BUCKET_NAME,
@@ -383,14 +355,13 @@ def process_gallery_images(data: Dict, gallery_id: str) -> Dict:
                                         ContentType='application/pdf',
                                         CacheControl='public, max-age=31536000'
                                     )
-                                    # Add PDF URL to response
                                     data['pdf_url'] = f"{R2_PUBLIC_URL.rstrip('/')}/{pdf_key}"
-                                    logger.info(f"Successfully created and uploaded PDF for gallery {gallery_id}")
+                                    logger.info(f"PDF created and uploaded successfully")
                                 except Exception as e:
-                                    logger.error(f"Failed to upload PDF to R2: {str(e)}", exc_info=True)
+                                    logger.error(f"Failed to upload PDF: {str(e)}")
                                     data['pdf_error'] = "Failed to upload PDF to storage"
                 except Exception as e:
-                    logger.error(f"Failed to create PDF for gallery {gallery_id}: {str(e)}", exc_info=True)
+                    logger.error(f"PDF creation failed: {str(e)}")
                     data['pdf_error'] = "Failed to create PDF"
             
             # Process individual pages
@@ -408,8 +379,8 @@ def process_gallery_images(data: Dict, gallery_id: str) -> Dict:
         
         return data
     except Exception as e:
-        logger.error(f"Failed to process gallery images: {str(e)}", exc_info=True)
-        return data  # Return original data on error
+        logger.error(f"Gallery processing error: {str(e)}")
+        return data
 
 class CookieManager:
     def __init__(self, session: cfSession, target: str):
