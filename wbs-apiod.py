@@ -15,11 +15,20 @@ import concurrent.futures
 import boto3
 import hashlib
 from botocore.config import Config
+import io
+from PIL import Image
+import img2pdf
+import tempfile
+from dotenv import load_dotenv
+
+# Load environment variables from .env file in development
+if os.path.exists('.env'):
+    load_dotenv()
 
 # Configure logging for production
 logging.basicConfig(
-    level=logging.INFO,  # Changed from DEBUG to INFO
-    format='%(asctime)s - %(levelname)s - %(message)s'  # Simplified format
+    level=logging.DEBUG,  # Changed from INFO to DEBUG for testing
+    format='%(asctime)s - %(levelname)s - [%(funcName)s] %(message)s'  # Added function name to format
 )
 logger = logging.getLogger(__name__)
 
@@ -48,35 +57,55 @@ R2_PUBLIC_URL = os.environ.get('R2_PUBLIC_URL')  # Your custom domain or public 
 
 # Initialize R2 client if credentials are available
 r2_client = None
-if all([R2_ACCOUNT_ID, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY, R2_BUCKET_NAME, R2_PUBLIC_URL]):
-    try:
-        r2_client = boto3.client(
-            service_name='s3',
-            endpoint_url=f'https://{R2_ACCOUNT_ID}.r2.cloudflarestorage.com',
-            aws_access_key_id=R2_ACCESS_KEY_ID,
-            aws_secret_access_key=R2_SECRET_ACCESS_KEY,
-            config=Config(
-                retries={'max_attempts': 3},
-                connect_timeout=5,
-                read_timeout=30
-            )
+if all([R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY, R2_ACCOUNT_ID]):
+    r2_client = boto3.client(
+        service_name='s3',
+        endpoint_url=f'https://{R2_ACCOUNT_ID}.r2.cloudflarestorage.com',
+        aws_access_key_id=R2_ACCESS_KEY_ID,
+        aws_secret_access_key=R2_SECRET_ACCESS_KEY,
+        config=Config(
+            region_name='auto',
+            s3={'addressing_style': 'virtual'}
         )
-        logger.info("R2 client initialized successfully - CDN mirroring enabled")
+    )
+
+def upload_to_r2(file_data: bytes, key: str, content_type: str = 'application/pdf') -> str:
+    """
+    Upload a file to R2 storage and return its public URL
+    """
+    if not r2_client:
+        raise Exception("R2 client not initialized. Check your environment variables.")
+    
+    try:
+        r2_client.put_object(
+            Bucket=R2_BUCKET_NAME,
+            Key=key,
+            Body=file_data,
+            ContentType=content_type
+        )
+        return f"{R2_PUBLIC_URL.rstrip('/')}/{key}"
     except Exception as e:
-        logger.error(f"Failed to initialize R2 client: {str(e)}")
-        r2_client = None
-else:
-    missing_vars = [var for var, val in {
-        'CF_ACCOUNT_ID': R2_ACCOUNT_ID,
-        'R2_ACCESS_KEY_ID': R2_ACCESS_KEY_ID,
-        'R2_SECRET_ACCESS_KEY': R2_SECRET_ACCESS_KEY,
-        'R2_BUCKET_NAME': R2_BUCKET_NAME,
-        'R2_PUBLIC_URL': R2_PUBLIC_URL
-    }.items() if not val]
-    if missing_vars:
-        logger.warning(f"R2 credentials incomplete - missing: {', '.join(missing_vars)}")
-    else:
-        logger.warning("R2 credentials not found - CDN mirroring disabled")
+        logger.error(f"Failed to upload to R2: {str(e)}")
+        raise
+
+def get_from_r2(key: str) -> Union[bytes, None]:
+    """
+    Get a file from R2 storage
+    """
+    if not r2_client:
+        return None
+    
+    try:
+        response = r2_client.get_object(
+            Bucket=R2_BUCKET_NAME,
+            Key=key
+        )
+        return response['Body'].read()
+    except r2_client.exceptions.NoSuchKey:
+        return None
+    except Exception as e:
+        logger.error(f"Failed to get from R2: {str(e)}")
+        return None
 
 def get_cdn_url(original_url: str, gallery_id: str) -> str:
     """Generate CDN URL for an image"""
@@ -130,29 +159,241 @@ async def mirror_to_cdn(original_url: str, gallery_id: str) -> str:
         logger.error(f"Failed to mirror image to CDN: {str(e)}")
         return original_url
 
-def process_gallery_images(data: Dict, gallery_id: str) -> Dict:
-    """Process gallery images and mirror them to CDN if available, otherwise return original URLs"""
+def download_image(url: str, session: cfSession) -> bytes:
+    """Download an image from a URL and return its bytes"""
+    max_retries = 3
+    retry_count = 0
+    
+    while retry_count < max_retries:
+        try:
+            logger.debug(f"Attempt {retry_count + 1}/{max_retries} to download image from: {url}")
+            
+            response = session.get(url, verify=False, timeout=10)
+            logger.debug(f"Download response status: {response.status_code}")
+            logger.debug(f"Response headers: {dict(response.headers)}")
+            
+            if response.status_code == 403:
+                retry_count += 1
+                if retry_count < max_retries:
+                    logger.info(f"Got 403, waiting before retry...")
+                    # Try to renew cookies
+                    response = session.get(WEB_TARGET, verify=False, timeout=10)
+                    time.sleep(2)  # Longer delay between retries
+                    continue
+                else:
+                    logger.error(f"Failed to download image after {max_retries} attempts: {url}")
+                    return None
+            
+            if response.status_code != 200:
+                logger.error(f"Failed to download image {url}: {response.status_code}")
+                return None
+                
+            content = response.content
+            logger.debug(f"Successfully downloaded image, size: {len(content)} bytes")
+            return content
+            
+        except Exception as e:
+            logger.error(f"Failed to download image: {str(e)}", exc_info=True)
+            retry_count += 1
+            if retry_count < max_retries:
+                time.sleep(2)  # Longer delay between retries
+                continue
+            return None
+    
+    return None
+
+def create_pdf_from_images(images: list[bytes], gallery_id: str) -> bytes:
+    """Create a PDF from a list of image bytes"""
     try:
+        # Convert images to PIL Images and save as temporary files
+        temp_files = []
+        image_files = []
+        
+        for img_bytes in images:
+            if not img_bytes:
+                continue
+                
+            try:
+                # Create a temporary file
+                temp = tempfile.NamedTemporaryFile(delete=False, suffix='.jpg')
+                temp_files.append(temp.name)
+                
+                # Convert to RGB if needed and save as JPEG
+                img = Image.open(io.BytesIO(img_bytes))
+                if img.mode in ('RGBA', 'LA'):
+                    background = Image.new('RGB', img.size, (255, 255, 255))
+                    background.paste(img, mask=img.split()[-1])
+                    img = background
+                elif img.mode != 'RGB':
+                    img = img.convert('RGB')
+                
+                img.save(temp.name, 'JPEG', quality=85)
+                image_files.append(temp.name)
+            except Exception as e:
+                logger.error(f"Failed to process image: {str(e)}")
+                continue
+        
+        if not image_files:
+            raise Exception("No valid images to create PDF")
+            
+        # Create PDF
+        pdf_bytes = img2pdf.convert(image_files)
+        
+        # Clean up temporary files
+        for temp_file in temp_files:
+            try:
+                os.remove(temp_file)
+            except:
+                pass
+                
+        return pdf_bytes
+    except Exception as e:
+        logger.error(f"Failed to create PDF: {str(e)}")
+        return None
+
+def get_json_web(html_content: str) -> Dict:
+    """Extract JSON data from HTML content"""
+    try:
+        # Find the gallery JSON data in the HTML
+        match = re.search(r'JSON\.parse\(["\'](.+?)["\']\)', html_content)
+        if not match:
+            logger.error("Failed to find JSON data in HTML")
+            return None
+            
+        # Unescape the JSON string and parse it
+        json_str = match.group(1).encode('utf-8').decode('unicode_escape')
+        data = json.loads(json_str)
+        logger.info(f"Extracted JSON data: {json.dumps(data)[:200]}...")  # Log first 200 chars
+        
+        # Debug image URLs
+        if 'images' in data and 'pages' in data['images']:
+            logger.debug("Found image pages in JSON data")
+            for i, page in enumerate(data['images']['pages']):
+                original_url = page.get('url', '')
+                logger.debug(f"Page {i+1} URL: {original_url}")
+                # Try to convert t*.nhentai.net to i*.nhentai.net
+                if original_url.startswith('https://t'):
+                    new_url = original_url.replace('//t', '//i', 1)
+                    logger.debug(f"Converting URL from {original_url} to {new_url}")
+                    page['url'] = new_url
+                
+        return data
+    except Exception as e:
+        logger.error(f"Failed to extract JSON data: {str(e)}", exc_info=True)
+        return None
+
+def process_gallery_images(data: Dict, gallery_id: str) -> Dict:
+    """Process gallery images and create PDF if R2 is available"""
+    try:
+        logger.debug(f"Starting to process gallery images for gallery_id: {gallery_id}")
+        logger.debug(f"R2 client initialized: {r2_client is not None}")
+        
         # Process cover image if exists
         if 'images' in data and 'cover' in data['images']:
+            logger.debug("Processing cover image")
             cover = data['images']['cover']
             if 'url' in cover:
+                original_url = cover.get('url', '')
+                if original_url.startswith('https://t'):
+                    new_url = original_url.replace('//t', '//i', 1)
+                    logger.debug(f"Converting cover URL from {original_url} to {new_url}")
+                    cover['url'] = new_url
                 if r2_client:
                     cover['cdn_url'] = get_cdn_url(cover['url'], gallery_id)
+                    logger.debug(f"Generated CDN URL for cover: {cover['cdn_url']}")
                 else:
-                    cover['url'] = cover.get('url', '')  # Ensure URL exists
-        
-        # Process thumbnail if exists
-        if 'images' in data and 'thumbnail' in data['images']:
-            thumb = data['images']['thumbnail']
-            if 'url' in thumb:
-                if r2_client:
-                    thumb['cdn_url'] = get_cdn_url(thumb['url'], gallery_id)
-                else:
-                    thumb['url'] = thumb.get('url', '')  # Ensure URL exists
+                    cover['url'] = cover.get('url', '')
         
         # Process all page images
         if 'images' in data and 'pages' in data['images']:
+            logger.debug(f"Processing {len(data['images']['pages'])} pages")
+            # If R2 is available, test first page download
+            if r2_client:
+                try:
+                    # Create a single CFSession for testing
+                    cf_session = cfSession(directory=cfDirectory(CACHE_DIR), headless_mode=True)
+                    # Initialize session with a request to the main site
+                    logger.debug("Initializing CFSession with main site request")
+                    cf_session.get(WEB_TARGET, verify=False, timeout=10)
+                    
+                    # Test download of first page
+                    first_page = data['images']['pages'][0]
+                    if 'url' in first_page:
+                        url = first_page['url']
+                        logger.debug(f"Testing download of first page: {url}")
+                        # Convert URL if needed
+                        if url.startswith('https://t'):
+                            url = url.replace('//t', '//i', 1)
+                            logger.debug(f"Using converted URL for download: {url}")
+                        img_bytes = download_image(url, cf_session)
+                        if not img_bytes:
+                            logger.error("Failed to download first page, skipping PDF creation")
+                            data['pdf_error'] = "Failed to download test page"
+                            # Process CDN URLs and return early
+                            for page in data['images']['pages']:
+                                if r2_client:
+                                    if 'url' in page:
+                                        page['cdn_url'] = get_cdn_url(page['url'], gallery_id)
+                                    if 'thumbnail' in page:
+                                        page['thumbnail_cdn'] = get_cdn_url(page['thumbnail'], gallery_id)
+                            return data
+                        
+                        logger.info("Successfully downloaded test page, proceeding with full processing")
+                        # Continue with normal processing...
+                        image_bytes = [img_bytes]  # Start with our test page
+                        failed_pages = []
+                        
+                        # Process remaining pages
+                        for i, page in enumerate(data['images']['pages'][1:], 2):  # Start from second page
+                            logger.debug(f"Processing page {i}/{len(data['images']['pages'])}")
+                            if 'url' in page:
+                                url = page['url']
+                                if url.startswith('https://t'):
+                                    url = url.replace('//t', '//i', 1)
+                                logger.debug(f"Downloading image from URL: {url}")
+                                img_bytes = download_image(url, cf_session)
+                                if img_bytes:
+                                    image_bytes.append(img_bytes)
+                                    logger.debug(f"Successfully downloaded page {i}")
+                                else:
+                                    logger.error(f"Failed to download page {i}")
+                                    failed_pages.append(i)
+                            
+                            # Add a longer delay between downloads
+                            time.sleep(2)
+                        
+                        logger.debug(f"Successfully downloaded {len(image_bytes)} images out of {len(data['images']['pages'])} pages")
+                        if failed_pages:
+                            logger.warning(f"Failed to download pages: {failed_pages}")
+                            data['failed_pages'] = failed_pages
+                        
+                        if image_bytes:
+                            # Create PDF
+                            logger.debug("Creating PDF from downloaded images")
+                            pdf_bytes = create_pdf_from_images(image_bytes, gallery_id)
+                            if pdf_bytes:
+                                # Upload PDF to R2
+                                pdf_key = f"galleries/{gallery_id}/full.pdf"
+                                logger.debug(f"Uploading PDF to R2 with key: {pdf_key}")
+                                try:
+                                    r2_client.put_object(
+                                        Bucket=R2_BUCKET_NAME,
+                                        Key=pdf_key,
+                                        Body=pdf_bytes,
+                                        ContentType='application/pdf',
+                                        CacheControl='public, max-age=31536000'
+                                    )
+                                    # Add PDF URL to response
+                                    data['pdf_url'] = f"{R2_PUBLIC_URL.rstrip('/')}/{pdf_key}"
+                                    logger.info(f"Successfully created and uploaded PDF for gallery {gallery_id}")
+                                except Exception as e:
+                                    logger.error(f"Failed to upload PDF to R2: {str(e)}", exc_info=True)
+                                    data['pdf_error'] = "Failed to upload PDF to storage"
+                except Exception as e:
+                    logger.error(f"Failed to create PDF for gallery {gallery_id}: {str(e)}", exc_info=True)
+                    data['pdf_error'] = "Failed to create PDF"
+            
+            # Process individual pages
             for page in data['images']['pages']:
                 if r2_client:
                     if 'url' in page:
@@ -160,7 +401,6 @@ def process_gallery_images(data: Dict, gallery_id: str) -> Dict:
                     if 'thumbnail' in page:
                         page['thumbnail_cdn'] = get_cdn_url(page['thumbnail'], gallery_id)
                 else:
-                    # Ensure URLs exist and are accessible
                     if 'thumbnail' in page:
                         page['thumbnail'] = page.get('thumbnail', '')
                     if 'url' in page:
@@ -168,7 +408,7 @@ def process_gallery_images(data: Dict, gallery_id: str) -> Dict:
         
         return data
     except Exception as e:
-        logger.error(f"Failed to process gallery images: {str(e)}")
+        logger.error(f"Failed to process gallery images: {str(e)}", exc_info=True)
         return data  # Return original data on error
 
 class CookieManager:
@@ -176,9 +416,10 @@ class CookieManager:
         self.session = session
         self.target = target
         self.last_renewal = 0
-        self.renewal_interval = 60  # Renew every 60 seconds
+        self.renewal_interval = 30  # Reduced from 60 to 30 seconds
         self.lock = threading.Lock()
         self._renewing = False
+        self.max_retries = 3
         
     def ensure_valid_cookies(self) -> bool:
         """Ensures cookies are valid, renews if necessary"""
@@ -193,12 +434,12 @@ class CookieManager:
                 return self._renew_cookies()
             
             try:
-                response = self.session.session.get(self.target, verify=False)
+                response = self.session.session.get(self.target, verify=False, timeout=10)
                 if response.status_code != 200:
                     return self._renew_cookies()
                 return True
             except Exception as e:
-                logger.error(f"Cookie validation failed: {str(e)}")
+                logger.error(f"Cookie validation failed: {str(e)}", exc_info=True)
                 return self._renew_cookies()
     
     def _renew_cookies(self) -> bool:
@@ -207,20 +448,35 @@ class CookieManager:
             return True
             
         self._renewing = True
-        try:
-            response = self.session.get(self.target, verify=False)
-            success = response.status_code == 200
-            if success:
-                self.last_renewal = time.time()
-                logger.info("Cookie renewal completed")
-            else:
+        retry_count = 0
+        
+        while retry_count < self.max_retries:
+            try:
+                logger.info(f"Attempting to renew cookies (attempt {retry_count + 1}/{self.max_retries})")
+                response = self.session.get(self.target, verify=False, timeout=10)
+                success = response.status_code == 200
+                
+                if success:
+                    self.last_renewal = time.time()
+                    logger.info("Cookie renewal completed successfully")
+                    self._renewing = False
+                    return True
+                    
                 logger.error(f"Cookie renewal failed: status {response.status_code}")
-            return success
-        except Exception as e:
-            logger.error(f"Cookie renewal error: {str(e)}")
-            return False
-        finally:
-            self._renewing = False
+                retry_count += 1
+                if retry_count < self.max_retries:
+                    time.sleep(2)  # Wait before retrying
+                    continue
+                    
+            except Exception as e:
+                logger.error(f"Cookie renewal error: {str(e)}", exc_info=True)
+                retry_count += 1
+                if retry_count < self.max_retries:
+                    time.sleep(2)  # Wait before retrying
+                    continue
+                    
+        self._renewing = False
+        return False
 
 class GalleryCache:
     def __init__(self, cache_dir: str):
@@ -431,5 +687,5 @@ def notFound(e):
     return json_resp({"code": 404, "status": "You are lost"}, status=404)
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5000))
+    port = int(os.environ.get("PORT", 5001))
     app.run(host="0.0.0.0", port=port)

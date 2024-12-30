@@ -1,10 +1,12 @@
 FROM python:3.9-slim
 
-# Install system dependencies required for headless operation
+# Install system dependencies required for headless operation and image processing
 RUN apt-get update && apt-get install -y \
     chromium \
     chromium-driver \
     xvfb \
+    libjpeg-dev \
+    zlib1g-dev \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
