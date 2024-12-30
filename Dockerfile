@@ -16,6 +16,7 @@ COPY . .
 
 # Create cache directory with proper permissions
 RUN mkdir -p cache && chmod 777 cache
+RUN mkdir -p gallery_cache && chmod 777 gallery_cache
 
 # Use PORT environment variable from Render.com
 ENV PORT=5000
@@ -25,6 +26,13 @@ ENV CHROME_PATH=/usr/lib/chromium/
 ENV CHROME_DRIVER_PATH=/usr/bin/chromedriver
 ENV NO_SANDBOX=true
 ENV DISPLAY=:99
+
+# R2 Configuration (to be provided at runtime)
+ENV CF_ACCOUNT_ID=""
+ENV R2_ACCESS_KEY_ID=""
+ENV R2_SECRET_ACCESS_KEY=""
+ENV R2_BUCKET_NAME=""
+ENV R2_PUBLIC_URL=""
 
 # Add a non-root user
 RUN useradd -m myuser && chown -R myuser:myuser /app

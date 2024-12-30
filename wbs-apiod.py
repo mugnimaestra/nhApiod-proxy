@@ -12,6 +12,9 @@ import urllib3
 import requests
 import time
 import concurrent.futures
+import boto3
+import hashlib
+from botocore.config import Config
 
 # Configure logging for production
 logging.basicConfig(
@@ -35,6 +38,138 @@ REQUEST_DELAY = 0.1  # 100ms delay between requests in the same thread
 # Add these constants with the others
 GALLERY_CACHE_DIR = os.path.join(os.getcwd(), "gallery_cache")
 CACHE_DURATION = 60 * 60 * 24  # 24 hours in seconds
+
+# R2 Configuration
+R2_ACCOUNT_ID = os.environ.get('CF_ACCOUNT_ID')
+R2_ACCESS_KEY_ID = os.environ.get('R2_ACCESS_KEY_ID')
+R2_SECRET_ACCESS_KEY = os.environ.get('R2_SECRET_ACCESS_KEY')
+R2_BUCKET_NAME = os.environ.get('R2_BUCKET_NAME')
+R2_PUBLIC_URL = os.environ.get('R2_PUBLIC_URL')  # Your custom domain or public bucket URL
+
+# Initialize R2 client if credentials are available
+r2_client = None
+if all([R2_ACCOUNT_ID, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY, R2_BUCKET_NAME, R2_PUBLIC_URL]):
+    try:
+        r2_client = boto3.client(
+            service_name='s3',
+            endpoint_url=f'https://{R2_ACCOUNT_ID}.r2.cloudflarestorage.com',
+            aws_access_key_id=R2_ACCESS_KEY_ID,
+            aws_secret_access_key=R2_SECRET_ACCESS_KEY,
+            config=Config(
+                retries={'max_attempts': 3},
+                connect_timeout=5,
+                read_timeout=30
+            )
+        )
+        logger.info("R2 client initialized successfully - CDN mirroring enabled")
+    except Exception as e:
+        logger.error(f"Failed to initialize R2 client: {str(e)}")
+        r2_client = None
+else:
+    missing_vars = [var for var, val in {
+        'CF_ACCOUNT_ID': R2_ACCOUNT_ID,
+        'R2_ACCESS_KEY_ID': R2_ACCESS_KEY_ID,
+        'R2_SECRET_ACCESS_KEY': R2_SECRET_ACCESS_KEY,
+        'R2_BUCKET_NAME': R2_BUCKET_NAME,
+        'R2_PUBLIC_URL': R2_PUBLIC_URL
+    }.items() if not val]
+    if missing_vars:
+        logger.warning(f"R2 credentials incomplete - missing: {', '.join(missing_vars)}")
+    else:
+        logger.warning("R2 credentials not found - CDN mirroring disabled")
+
+def get_cdn_url(original_url: str, gallery_id: str) -> str:
+    """Generate CDN URL for an image"""
+    if not r2_client or not R2_PUBLIC_URL:
+        return original_url
+        
+    # Create a unique but consistent path for the image
+    url_hash = hashlib.md5(original_url.encode()).hexdigest()
+    extension = original_url.split('.')[-1]
+    cdn_path = f"galleries/{gallery_id}/{url_hash}.{extension}"
+    
+    return f"{R2_PUBLIC_URL.rstrip('/')}/{cdn_path}"
+
+async def mirror_to_cdn(original_url: str, gallery_id: str) -> str:
+    """Mirror an image to R2 and return CDN URL"""
+    if not r2_client:
+        return original_url
+        
+    try:
+        # Download image
+        response = session.get(original_url, verify=False, stream=True)
+        if response.status_code != 200:
+            logger.error(f"Failed to download image {original_url}: {response.status_code}")
+            return original_url
+            
+        # Generate CDN path
+        url_hash = hashlib.md5(original_url.encode()).hexdigest()
+        extension = original_url.split('.')[-1]
+        cdn_path = f"galleries/{gallery_id}/{url_hash}.{extension}"
+        
+        # Check if already exists in R2
+        try:
+            r2_client.head_object(Bucket=R2_BUCKET_NAME, Key=cdn_path)
+            logger.info(f"Image already exists in CDN: {cdn_path}")
+            return get_cdn_url(original_url, gallery_id)
+        except:
+            # Upload to R2
+            r2_client.upload_fileobj(
+                response.raw,
+                R2_BUCKET_NAME,
+                cdn_path,
+                ExtraArgs={
+                    'ContentType': response.headers.get('content-type', 'image/webp'),
+                    'CacheControl': 'public, max-age=31536000'  # Cache for 1 year
+                }
+            )
+            logger.info(f"Uploaded image to CDN: {cdn_path}")
+            
+        return get_cdn_url(original_url, gallery_id)
+    except Exception as e:
+        logger.error(f"Failed to mirror image to CDN: {str(e)}")
+        return original_url
+
+def process_gallery_images(data: Dict, gallery_id: str) -> Dict:
+    """Process gallery images and mirror them to CDN if available, otherwise return original URLs"""
+    try:
+        # Process cover image if exists
+        if 'images' in data and 'cover' in data['images']:
+            cover = data['images']['cover']
+            if 'url' in cover:
+                if r2_client:
+                    cover['cdn_url'] = get_cdn_url(cover['url'], gallery_id)
+                else:
+                    cover['url'] = cover.get('url', '')  # Ensure URL exists
+        
+        # Process thumbnail if exists
+        if 'images' in data and 'thumbnail' in data['images']:
+            thumb = data['images']['thumbnail']
+            if 'url' in thumb:
+                if r2_client:
+                    thumb['cdn_url'] = get_cdn_url(thumb['url'], gallery_id)
+                else:
+                    thumb['url'] = thumb.get('url', '')  # Ensure URL exists
+        
+        # Process all page images
+        if 'images' in data and 'pages' in data['images']:
+            for page in data['images']['pages']:
+                if r2_client:
+                    if 'url' in page:
+                        page['cdn_url'] = get_cdn_url(page['url'], gallery_id)
+                    if 'thumbnail' in page:
+                        page['thumbnail_cdn'] = get_cdn_url(page['thumbnail'], gallery_id)
+                else:
+                    # Ensure URLs exist and are accessible
+                    if 'thumbnail' in page:
+                        page['thumbnail'] = page.get('thumbnail', '')
+                    if 'url' in page:
+                        page['url'] = page.get('url', '')
+        
+        return data
+    except Exception as e:
+        logger.error(f"Failed to process gallery images: {str(e)}")
+        return data  # Return original data on error
 
 class CookieManager:
     def __init__(self, session: cfSession, target: str):
@@ -210,6 +345,10 @@ def get_json_web(response) -> Union[None, Dict]:
                             page_data['thumbnail'] = thumb_url
                             # Set fallback URL by removing 't' from thumbnail
                             page_data['url'] = thumb_url.replace("t.", ".")
+        
+        # Process images for CDN if available
+        if r2_client and 'media_id' in data:
+            data = process_gallery_images(data, data['media_id'])
         
         return (data, 200)  # Return raw data without wrapping
     except Exception as e:
