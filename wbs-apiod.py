@@ -39,6 +39,11 @@ CACHE_DIR = os.path.join(os.getcwd(),"cache")
 WEB_TARGET = "https://nhentai.net"
 app = Flask(__name__)
 
+# Configure Flask for long-running requests
+app.config['SEND_FILE_MAX_AGE_DEFAULT'] = 0
+app.config['MAX_CONTENT_LENGTH'] = 100 * 1024 * 1024  # 100MB max-length
+app.config['JSONIFY_PRETTYPRINT_REGULAR'] = False
+
 # Add these near the top with other constants
 MAX_WORKERS = min(32, (os.cpu_count() or 1) * 4)  # Default to CPU count * 4, max 32
 CHUNK_SIZE = 10  # Number of pages to process in each batch
@@ -299,8 +304,8 @@ def process_gallery_images(data: Dict, gallery_id: str) -> Dict:
                 original_url = cover.get('url', '')
                 if original_url.startswith('https://t'):
                     cover['url'] = original_url.replace('//t', '//i', 1)
-                if r2_client:
-                    cover['cdn_url'] = get_cdn_url(cover['url'], gallery_id)
+                if r2_client and 'media_id' in data:
+                    cover['cdn_url'] = get_cdn_url(cover['url'], data['media_id'])
         
         # Process all page images
         if 'images' in data and 'pages' in data['images']:
@@ -331,11 +336,11 @@ def process_gallery_images(data: Dict, gallery_id: str) -> Dict:
                                 data['pdf_error'] = "Failed to download test page"
                                 # Process CDN URLs and return early
                                 for page in data['images']['pages']:
-                                    if r2_client:
+                                    if r2_client and 'media_id' in data:
                                         if 'url' in page:
-                                            page['cdn_url'] = get_cdn_url(page['url'], gallery_id)
+                                            page['cdn_url'] = get_cdn_url(page['url'], data['media_id'])
                                         if 'thumbnail' in page:
-                                            page['thumbnail_cdn'] = get_cdn_url(page['thumbnail'], gallery_id)
+                                            page['thumbnail_cdn'] = get_cdn_url(page['thumbnail'], data['media_id'])
                                 return data
                             
                             logger.info("First page download successful")
@@ -366,29 +371,43 @@ def process_gallery_images(data: Dict, gallery_id: str) -> Dict:
                                 if pdf_bytes:
                                     pdf_key = f"galleries/{gallery_id}/full.pdf"
                                     try:
-                                        r2_client.put_object(
+                                        logger.info(f"Uploading PDF to R2 with key: {pdf_key}, size: {len(pdf_bytes)} bytes")
+                                        upload_response = r2_client.put_object(
                                             Bucket=R2_BUCKET_NAME,
                                             Key=pdf_key,
                                             Body=pdf_bytes,
                                             ContentType='application/pdf',
                                             CacheControl='public, max-age=31536000'
                                         )
-                                        data['pdf_url'] = f"{R2_PUBLIC_URL.rstrip('/')}/{pdf_key}"
-                                        logger.info(f"PDF created and uploaded successfully")
+                                        logger.info(f"R2 upload response: {upload_response}")
+                                        
+                                        # Verify the upload by trying to get the object
+                                        try:
+                                            r2_client.head_object(Bucket=R2_BUCKET_NAME, Key=pdf_key)
+                                            logger.info("Successfully verified PDF in R2")
+                                            data['pdf_url'] = f"{R2_PUBLIC_URL.rstrip('/')}/{pdf_key}"
+                                            logger.info(f"PDF created and uploaded successfully: {data['pdf_url']}")
+                                        except Exception as e:
+                                            logger.error(f"Failed to verify PDF in R2: {str(e)}")
+                                            data['pdf_error'] = "Failed to verify PDF in storage"
+                                            
                                     except Exception as e:
-                                        logger.error(f"Failed to upload PDF: {str(e)}")
+                                        logger.error(f"Failed to upload PDF to R2: {str(e)}")
                                         data['pdf_error'] = "Failed to upload PDF to storage"
+                                else:
+                                    logger.error("PDF creation returned None")
+                                    data['pdf_error'] = "Failed to create PDF"
                     except Exception as e:
                         logger.error(f"PDF creation failed: {str(e)}")
                         data['pdf_error'] = "Failed to create PDF"
             
             # Process individual pages
             for page in data['images']['pages']:
-                if r2_client:
+                if r2_client and 'media_id' in data:
                     if 'url' in page:
-                        page['cdn_url'] = get_cdn_url(page['url'], gallery_id)
+                        page['cdn_url'] = get_cdn_url(page['url'], data['media_id'])
                     if 'thumbnail' in page:
-                        page['thumbnail_cdn'] = get_cdn_url(page['thumbnail'], gallery_id)
+                        page['thumbnail_cdn'] = get_cdn_url(page['thumbnail'], data['media_id'])
                 else:
                     if 'thumbnail' in page:
                         page['thumbnail'] = page.get('thumbnail', '')
@@ -543,9 +562,22 @@ except Exception as e:
     logger.error(f"Application initialization failed: {str(e)}")
     raise
 
+def stream_with_context(data):
+    """Stream response with context to keep connection alive"""
+    def generate():
+        yield json.dumps(data)
+    return Response(generate(), mimetype='application/json')
+
 def json_resp(jsondict, status=200):
-    resp = jsonify(jsondict)
+    """Enhanced JSON response with proper headers for long-running requests"""
+    if status == 200:
+        resp = stream_with_context(jsondict)
+    else:
+        resp = jsonify(jsondict)
+    
     resp.status_code = status
+    resp.headers['X-Accel-Buffering'] = 'no'
+    resp.headers['Cache-Control'] = 'no-cache'
     return resp
 
 def conditioner(func):
@@ -592,13 +624,47 @@ def get_json_web(response) -> Union[None, Dict]:
                             page_data['url'] = thumb_url.replace("t.", ".")
         
         # Process images for CDN if available
-        if r2_client and 'media_id' in data:
-            data = process_gallery_images(data, data['media_id'])
+        if r2_client and 'id' in data:
+            data = process_gallery_images(data, str(data['id']))
         
         return (data, 200)  # Return raw data without wrapping
     except Exception as e:
         logger.error(f"JSON extraction failed: {str(e)}")
         return ({"status": False, "reason": f"Error processing data: {str(e)}"}, 500)
+
+def verify_cached_data(data: Dict) -> Dict:
+    """Verify R2 URLs in cached data and update if needed"""
+    if not r2_client or 'id' not in data:
+        return data
+        
+    try:
+        # Verify PDF URL if exists
+        if 'pdf_url' in data:
+            pdf_key = f"galleries/{data['id']}/full.pdf"
+            try:
+                # Try to get the object to verify it exists
+                r2_client.head_object(Bucket=R2_BUCKET_NAME, Key=pdf_key)
+                logger.info(f"Verified PDF exists in R2: {pdf_key}")
+                # Update the URL in case R2_PUBLIC_URL has changed
+                data['pdf_url'] = f"{R2_PUBLIC_URL.rstrip('/')}/{pdf_key}"
+            except r2_client.exceptions.ClientError as e:
+                if e.response['Error']['Code'] == '404':
+                    logger.info(f"PDF not found in R2: {pdf_key}, will recreate")
+                    data = process_gallery_images(data, str(data['id']))
+                else:
+                    logger.error(f"R2 error checking PDF: {str(e)}")
+                    data['pdf_error'] = "Error checking PDF in storage"
+            except Exception as e:
+                logger.error(f"Error checking PDF in R2: {str(e)}")
+                data['pdf_error'] = "Error checking PDF in storage"
+        else:
+            logger.info("No PDF URL in cached data, will create")
+            data = process_gallery_images(data, str(data['id']))
+            
+        return data
+    except Exception as e:
+        logger.error(f"Error verifying cached data: {str(e)}")
+        return data
 
 @app.route("/",methods=["GET"])
 def getmain():
@@ -640,8 +706,9 @@ def getdata():
     # Check cache first
     cached_data = gallery_cache.get(code)
     if cached_data:
-        logger.info(f"Returning cached data for gallery {code}")
-        return json_resp(cached_data, status=200)
+        logger.info(f"Found cached data for gallery {code}, verifying R2 URLs")
+        verified_data = verify_cached_data(cached_data)
+        return json_resp(verified_data, status=200)
     
     # Retry logic for gallery fetch
     max_retries = 2
@@ -666,7 +733,6 @@ def getdata():
         except Exception as e:
             if attempt < max_retries - 1:
                 continue
-            logger.error(f"Gallery fetch failed for ID {code}: {str(e)}")
             return json_resp({"status": False, "reason": f"Error: {str(e)}"}, status=500)
     
     return json_resp({"status": False, "reason": "Maximum retries exceeded"}, status=500)
@@ -677,4 +743,8 @@ def notFound(e):
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5001))
-    app.run(host="0.0.0.0", port=port)
+    app.run(
+        host="0.0.0.0", 
+        port=port,
+        threaded=True
+    )
