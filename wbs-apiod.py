@@ -275,6 +275,18 @@ def get_json_web(html_content: str) -> Dict:
         logger.error(f"Failed to extract JSON data: {str(e)}", exc_info=True)
         return None
 
+def check_pdf_exists(gallery_id: str) -> str:
+    """Check if PDF exists in R2 and return its URL if found"""
+    if not r2_client:
+        return None
+        
+    try:
+        pdf_key = f"galleries/{gallery_id}/full.pdf"
+        r2_client.head_object(Bucket=R2_BUCKET_NAME, Key=pdf_key)
+        return f"{R2_PUBLIC_URL.rstrip('/')}/{pdf_key}"
+    except:
+        return None
+
 def process_gallery_images(data: Dict, gallery_id: str) -> Dict:
     """Process gallery images and create PDF if R2 is available"""
     try:
@@ -295,74 +307,80 @@ def process_gallery_images(data: Dict, gallery_id: str) -> Dict:
             total_pages = len(data['images']['pages'])
             logger.info(f"Processing {total_pages} pages")
             
-            # If R2 is available, test first page download
+            # If R2 is available, check if PDF exists first
             if r2_client:
-                try:
-                    cf_session = cfSession(directory=cfDirectory(CACHE_DIR), headless_mode=True)
-                    cf_session.get(WEB_TARGET, verify=False, timeout=10)
-                    
-                    # Test download of first page
-                    first_page = data['images']['pages'][0]
-                    if 'url' in first_page:
-                        url = first_page['url']
-                        if url.startswith('https://t'):
-                            url = url.replace('//t', '//i', 1)
-                        img_bytes = download_image(url, cf_session)
-                        if not img_bytes:
-                            logger.error("Failed to download first page")
-                            data['pdf_error'] = "Failed to download test page"
-                            # Process CDN URLs and return early
-                            for page in data['images']['pages']:
-                                if r2_client:
-                                    if 'url' in page:
-                                        page['cdn_url'] = get_cdn_url(page['url'], gallery_id)
-                                    if 'thumbnail' in page:
-                                        page['thumbnail_cdn'] = get_cdn_url(page['thumbnail'], gallery_id)
-                            return data
+                # Check if PDF already exists
+                existing_pdf_url = check_pdf_exists(gallery_id)
+                if existing_pdf_url:
+                    logger.info("PDF already exists, skipping creation")
+                    data['pdf_url'] = existing_pdf_url
+                else:
+                    try:
+                        cf_session = cfSession(directory=cfDirectory(CACHE_DIR), headless_mode=True)
+                        cf_session.get(WEB_TARGET, verify=False, timeout=10)
                         
-                        logger.info("First page download successful")
-                        image_bytes = [img_bytes]
-                        failed_pages = []
-                        
-                        # Process remaining pages
-                        for i, page in enumerate(data['images']['pages'][1:], 2):
-                            if 'url' in page:
-                                url = page['url']
-                                if url.startswith('https://t'):
-                                    url = url.replace('//t', '//i', 1)
-                                img_bytes = download_image(url, cf_session)
-                                if img_bytes:
-                                    image_bytes.append(img_bytes)
-                                else:
-                                    logger.error(f"Failed to download page {i}")
-                                    failed_pages.append(i)
-                            time.sleep(2)
-                        
-                        if failed_pages:
-                            logger.warning(f"Failed to download pages: {failed_pages}")
-                            data['failed_pages'] = failed_pages
-                        
-                        if image_bytes:
-                            logger.info("Creating PDF")
-                            pdf_bytes = create_pdf_from_images(image_bytes, gallery_id)
-                            if pdf_bytes:
-                                pdf_key = f"galleries/{gallery_id}/full.pdf"
-                                try:
-                                    r2_client.put_object(
-                                        Bucket=R2_BUCKET_NAME,
-                                        Key=pdf_key,
-                                        Body=pdf_bytes,
-                                        ContentType='application/pdf',
-                                        CacheControl='public, max-age=31536000'
-                                    )
-                                    data['pdf_url'] = f"{R2_PUBLIC_URL.rstrip('/')}/{pdf_key}"
-                                    logger.info(f"PDF created and uploaded successfully")
-                                except Exception as e:
-                                    logger.error(f"Failed to upload PDF: {str(e)}")
-                                    data['pdf_error'] = "Failed to upload PDF to storage"
-                except Exception as e:
-                    logger.error(f"PDF creation failed: {str(e)}")
-                    data['pdf_error'] = "Failed to create PDF"
+                        # Test download of first page
+                        first_page = data['images']['pages'][0]
+                        if 'url' in first_page:
+                            url = first_page['url']
+                            if url.startswith('https://t'):
+                                url = url.replace('//t', '//i', 1)
+                            img_bytes = download_image(url, cf_session)
+                            if not img_bytes:
+                                logger.error("Failed to download first page")
+                                data['pdf_error'] = "Failed to download test page"
+                                # Process CDN URLs and return early
+                                for page in data['images']['pages']:
+                                    if r2_client:
+                                        if 'url' in page:
+                                            page['cdn_url'] = get_cdn_url(page['url'], gallery_id)
+                                        if 'thumbnail' in page:
+                                            page['thumbnail_cdn'] = get_cdn_url(page['thumbnail'], gallery_id)
+                                return data
+                            
+                            logger.info("First page download successful")
+                            image_bytes = [img_bytes]
+                            failed_pages = []
+                            
+                            # Process remaining pages
+                            for i, page in enumerate(data['images']['pages'][1:], 2):
+                                if 'url' in page:
+                                    url = page['url']
+                                    if url.startswith('https://t'):
+                                        url = url.replace('//t', '//i', 1)
+                                    img_bytes = download_image(url, cf_session)
+                                    if img_bytes:
+                                        image_bytes.append(img_bytes)
+                                    else:
+                                        logger.error(f"Failed to download page {i}")
+                                        failed_pages.append(i)
+                                time.sleep(2)
+                            
+                            if failed_pages:
+                                logger.warning(f"Failed to download pages: {failed_pages}")
+                                data['failed_pages'] = failed_pages
+                            
+                            if image_bytes:
+                                logger.info("Creating PDF")
+                                pdf_bytes = create_pdf_from_images(image_bytes, gallery_id)
+                                if pdf_bytes:
+                                    pdf_key = f"galleries/{gallery_id}/full.pdf"
+                                    try:
+                                        r2_client.put_object(
+                                            Bucket=R2_BUCKET_NAME,
+                                            Key=pdf_key,
+                                            Body=pdf_bytes,
+                                            ContentType='application/pdf',
+                                            CacheControl='public, max-age=31536000'
+                                        )
+                                        data['pdf_url'] = f"{R2_PUBLIC_URL.rstrip('/')}/{pdf_key}"
+                                        logger.info(f"PDF created and uploaded successfully")
+                                    except Exception as e:
+                                        logger.error(f"Failed to upload PDF: {str(e)}")
+                                        data['pdf_error'] = "Failed to upload PDF to storage"
+                    except Exception as e:
+                        logger.error(f"PDF creation failed: {str(e)}")
+                        data['pdf_error'] = "Failed to create PDF"
             
             # Process individual pages
             for page in data['images']['pages']:
