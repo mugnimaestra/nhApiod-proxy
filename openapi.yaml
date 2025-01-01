@@ -231,8 +231,15 @@ components:
           description: Present when PDF is ready
         pdf_status:
           type: string
-          enum: [processing, completed, failed]
-          description: PDF generation status
+          enum: [processing, completed, failed, unavailable, not_requested, error]
+          description: |
+            PDF generation status:
+            * processing - PDF is being generated
+            * completed - PDF is ready and available
+            * failed - PDF generation failed
+            * unavailable - R2 storage not configured
+            * not_requested - PDF generation not requested
+            * error - Error during gallery processing
         failed_pages:
           type: array
           items:

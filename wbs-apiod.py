@@ -397,13 +397,18 @@ def process_gallery_images(data: Dict, gallery_id: str, process_pdf: bool = True
                     if r2_client and 'media_id' in data:
                         page['thumbnail_cdn'] = get_cdn_url(page['thumbnail'], data['media_id'])
             
-            # Start PDF processing in background if requested
-            if process_pdf and r2_client:
+            # Handle PDF status
+            if not r2_client:
+                data['pdf_status'] = "unavailable"  # R2 not configured
+            elif not process_pdf:
+                data['pdf_status'] = "not_requested"  # PDF processing not requested
+            else:
                 # Check if PDF exists first
                 existing_pdf_url = check_pdf_exists(gallery_id)
                 if existing_pdf_url:
                     logger.info("PDF already exists")
                     data['pdf_url'] = existing_pdf_url
+                    data['pdf_status'] = "completed"
                 else:
                     # Check if already processing
                     if gallery_id in PROCESSING_STATUS:
@@ -412,10 +417,11 @@ def process_gallery_images(data: Dict, gallery_id: str, process_pdf: bool = True
                         # Start background processing
                         PDF_PROCESSING_EXECUTOR.submit(process_pdf_in_background, data.copy(), gallery_id)
                         data['pdf_status'] = "processing"
-        
+            
         return data
     except Exception as e:
         logger.error(f"Gallery processing error: {str(e)}")
+        data['pdf_status'] = "error"  # Add error status
         return data
 
 class CookieManager:
