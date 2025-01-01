@@ -21,6 +21,7 @@ import img2pdf
 import tempfile
 from dotenv import load_dotenv
 from concurrent.futures import ThreadPoolExecutor
+import yaml
 
 # Load environment variables from .env file in development
 if os.path.exists('.env'):
@@ -835,6 +836,20 @@ def notFound(e):
 def api_docs():
     """Serve the API documentation"""
     return send_from_directory('docs', 'swagger.html')
+
+@app.route("/openapi.json")
+def openapi_spec():
+    """Serve the OpenAPI specification as JSON"""
+    try:
+        with open('openapi.yaml', 'r', encoding='utf-8') as f:
+            spec = yaml.safe_load(f)
+        return jsonify(spec)
+    except Exception as e:
+        logger.error(f"Failed to serve OpenAPI spec: {str(e)}")
+        return json_resp({
+            "status": False,
+            "reason": "Failed to load OpenAPI specification"
+        }, status=500)
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5001))

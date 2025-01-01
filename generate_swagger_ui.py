@@ -61,6 +61,23 @@ TEMPLATE = """
         .swagger-ui .topbar {
             display: none;
         }
+        .download-url-wrapper {
+            display: flex;
+            align-items: center;
+            margin: 1em 0;
+        }
+        .download-url-button {
+            background-color: #4990e2;
+            color: white;
+            border: none;
+            padding: 8px 16px;
+            border-radius: 4px;
+            cursor: pointer;
+            margin-left: 10px;
+        }
+        .download-url-button:hover {
+            background-color: #357abd;
+        }
     </style>
 </head>
 <body>
@@ -75,6 +92,10 @@ TEMPLATE = """
                 defaultModelsExpandDepth: -1,
                 displayRequestDuration: true,
                 filter: true,
+                withCredentials: true,
+                persistAuthorization: true,
+                tryItOutEnabled: true,
+                supportedSubmitMethods: ['get', 'post'],
                 presets: [
                     SwaggerUIBundle.presets.apis,
                     SwaggerUIBundle.SwaggerUIStandalonePreset
@@ -82,6 +103,13 @@ TEMPLATE = """
                 plugins: [
                     SwaggerUIBundle.plugins.DownloadUrl
                 ],
+                urls: [
+                    {
+                        name: "OpenAPI Specification",
+                        url: "./openapi.json"
+                    }
+                ],
+                "urls.primaryName": "OpenAPI Specification"
             });
         };
     </script>
