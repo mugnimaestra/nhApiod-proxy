@@ -20,6 +20,9 @@ COPY . .
 RUN mkdir -p cache && chmod 777 cache
 RUN mkdir -p gallery_cache && chmod 777 gallery_cache
 
+# Generate Swagger UI documentation
+RUN python generate_swagger_ui.py
+
 # Use PORT environment variable from Render.com
 ENV PORT=5000
 # Set Chrome to run in no-sandbox mode (required for containerized environment)

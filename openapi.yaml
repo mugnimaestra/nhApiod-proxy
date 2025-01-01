@@ -1,0 +1,296 @@
+openapi: 3.0.3
+info:
+  title: nhApiod-proxy API
+  description: API for fetching and caching gallery data with PDF generation
+  version: 1.0.0
+servers:
+  - url: http://localhost:5001
+    description: Local development server (default)
+  - url: https://nhApiod-proxy.onrender.com
+    description: Production server on Render
+  - url: {$API_URL}
+    description: Environment-configured server
+paths:
+  /get:
+    get:
+      summary: Get gallery data
+      description: Fetches gallery data including images and PDF status
+      parameters:
+        - name: id
+          in: query
+          required: true
+          schema:
+            type: integer
+          description: Gallery ID to fetch
+          example: 546408
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: '#/components/schemas/GalleryData'
+                  - $ref: '#/components/schemas/ApiErrorResponse'
+              example:
+                id: 546408
+                media_id: "3174462"
+                title:
+                  english: "[Example] Title [English]"
+                  japanese: "[例] タイトル"
+                  pretty: "Title"
+                images:
+                  pages:
+                    - t: "w"
+                      w: 1280
+                      h: 1804
+                      thumbnail: "https://t1.nhentai.net/galleries/3174462/1t.webp"
+                      url: "https://i1.nhentai.net/galleries/3174462/1.webp"
+                      cdn_url: "https://your-cdn.com/galleries/3174462/1.webp"
+                      thumbnail_cdn: "https://your-cdn.com/galleries/3174462/1t.webp"
+                  cover:
+                    t: "w"
+                    w: 350
+                    h: 494
+                  thumbnail:
+                    t: "w"
+                    w: 250
+                    h: 352
+                scanlator: ""
+                upload_date: 1735464041
+                tags:
+                  - id: 1234
+                    type: "tag"
+                    name: "example"
+                    url: "/tag/example/"
+                    count: 1000
+                num_pages: 58
+                num_favorites: 8509
+                pdf_status: "processing"
+        '404':
+          description: Gallery not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiErrorResponse'
+        '500':
+          description: Server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiErrorResponse'
+
+  /pdf-status/{gallery_id}:
+    get:
+      summary: Check PDF generation status
+      description: Get the current status of PDF generation for a gallery
+      parameters:
+        - name: gallery_id
+          in: path
+          required: true
+          schema:
+            type: integer
+          description: Gallery ID to check PDF status
+          example: 546408
+      responses:
+        '200':
+          description: PDF status response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PdfStatusResponse'
+              example:
+                status: true
+                pdf_status: "completed"
+                pdf_url: "https://your-cdn.com/galleries/546408/full.pdf"
+
+  /health-check:
+    get:
+      summary: Check API health
+      description: Check if the API is running and cookies are valid
+      responses:
+        '200':
+          description: Health check response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthCheckResponse'
+              example:
+                status: true
+                service: "nhApiod-proxy"
+                timestamp: 1704096000
+                cookies_ok: true
+
+components:
+  schemas:
+    GalleryTitle:
+      type: object
+      properties:
+        english:
+          type: string
+        japanese:
+          type: string
+        pretty:
+          type: string
+      required:
+        - english
+        - japanese
+        - pretty
+
+    GalleryImage:
+      type: object
+      properties:
+        t:
+          type: string
+          description: Image type (e.g., 'w' for webp)
+        w:
+          type: integer
+          description: Width in pixels
+        h:
+          type: integer
+          description: Height in pixels
+        thumbnail:
+          type: string
+          description: Thumbnail URL
+        url:
+          type: string
+          description: Full image URL
+        cdn_url:
+          type: string
+          description: R2 CDN URL if available
+        thumbnail_cdn:
+          type: string
+          description: R2 CDN thumbnail URL if available
+      required:
+        - t
+        - w
+        - h
+
+    GalleryImages:
+      type: object
+      properties:
+        pages:
+          type: array
+          items:
+            $ref: '#/components/schemas/GalleryImage'
+        cover:
+          $ref: '#/components/schemas/GalleryImage'
+        thumbnail:
+          $ref: '#/components/schemas/GalleryImage'
+      required:
+        - pages
+        - cover
+        - thumbnail
+
+    GalleryTag:
+      type: object
+      properties:
+        id:
+          type: integer
+        type:
+          type: string
+          enum: [tag, category, artist, parody, language]
+        name:
+          type: string
+        url:
+          type: string
+        count:
+          type: integer
+      required:
+        - id
+        - type
+        - name
+        - url
+        - count
+
+    GalleryData:
+      type: object
+      properties:
+        id:
+          type: integer
+        media_id:
+          type: string
+        title:
+          $ref: '#/components/schemas/GalleryTitle'
+        images:
+          $ref: '#/components/schemas/GalleryImages'
+        scanlator:
+          type: string
+        upload_date:
+          type: integer
+        tags:
+          type: array
+          items:
+            $ref: '#/components/schemas/GalleryTag'
+        num_pages:
+          type: integer
+        num_favorites:
+          type: integer
+        pdf_url:
+          type: string
+          description: Present when PDF is ready
+        pdf_status:
+          type: string
+          enum: [processing, completed, failed]
+          description: PDF generation status
+        failed_pages:
+          type: array
+          items:
+            type: integer
+          description: List of page numbers that failed to download
+      required:
+        - id
+        - media_id
+        - title
+        - images
+        - scanlator
+        - upload_date
+        - tags
+        - num_pages
+        - num_favorites
+
+    ApiErrorResponse:
+      type: object
+      properties:
+        status:
+          type: boolean
+          enum: [false]
+        reason:
+          type: string
+      required:
+        - status
+        - reason
+
+    PdfStatusResponse:
+      type: object
+      properties:
+        status:
+          type: boolean
+          enum: [true]
+        pdf_status:
+          type: string
+          enum: [not_started, processing, completed, failed]
+        pdf_url:
+          type: string
+          description: Present when status is "completed"
+      required:
+        - status
+        - pdf_status
+
+    HealthCheckResponse:
+      type: object
+      properties:
+        status:
+          type: boolean
+          enum: [true]
+        service:
+          type: string
+        timestamp:
+          type: integer
+        cookies_ok:
+          type: boolean
+      required:
+        - status
+        - service
+        - timestamp
+        - cookies_ok 

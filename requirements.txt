@@ -8,3 +8,4 @@ boto3==1.34.7
 Pillow==10.1.0
 img2pdf==0.5.1
 python-dotenv==1.0.0
+PyYAML==6.0.1

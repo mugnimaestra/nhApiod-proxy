@@ -1,4 +1,4 @@
-from flask import Flask, jsonify, request, Response
+from flask import Flask, jsonify, request, Response, send_from_directory
 from CFSession import cfSession, cfDirectory, Options
 from CFSession import cf
 import threading
@@ -20,6 +20,7 @@ from PIL import Image
 import img2pdf
 import tempfile
 from dotenv import load_dotenv
+from concurrent.futures import ThreadPoolExecutor
 
 # Load environment variables from .env file in development
 if os.path.exists('.env'):
@@ -73,6 +74,10 @@ if all([R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY, R2_ACCOUNT_ID]):
             s3={'addressing_style': 'virtual'}
         )
     )
+
+# Add these constants
+PDF_PROCESSING_EXECUTOR = ThreadPoolExecutor(max_workers=2)  # Limit concurrent PDF processing
+PROCESSING_STATUS = {}  # Track PDF processing status
 
 def upload_to_r2(file_data: bytes, key: str, content_type: str = 'application/pdf') -> str:
     """
@@ -292,8 +297,76 @@ def check_pdf_exists(gallery_id: str) -> str:
     except:
         return None
 
-def process_gallery_images(data: Dict, gallery_id: str) -> Dict:
-    """Process gallery images and create PDF if R2 is available"""
+def process_pdf_in_background(data: Dict, gallery_id: str):
+    """Process PDF creation in background thread"""
+    global PROCESSING_STATUS
+    
+    try:
+        PROCESSING_STATUS[gallery_id] = "processing"
+        logger.info(f"Starting background PDF processing for gallery {gallery_id}")
+        
+        # Create a new session for this thread
+        cf_session = cfSession(directory=cfDirectory(CACHE_DIR), headless_mode=True)
+        cf_session.get(WEB_TARGET, verify=False, timeout=10)
+        
+        # Download and process images
+        image_bytes = []
+        failed_pages = []
+        
+        for i, page in enumerate(data['images']['pages'], 1):
+            if 'url' in page:
+                url = page['url']
+                if url.startswith('https://t'):
+                    url = url.replace('//t', '//i', 1)
+                img_bytes = download_image(url, cf_session)
+                if img_bytes:
+                    image_bytes.append(img_bytes)
+                else:
+                    logger.error(f"Failed to download page {i}")
+                    failed_pages.append(i)
+            time.sleep(2)
+        
+        if failed_pages:
+            logger.warning(f"Failed to download pages: {failed_pages}")
+            data['failed_pages'] = failed_pages
+        
+        if image_bytes:
+            logger.info("Creating PDF")
+            pdf_bytes = create_pdf_from_images(image_bytes, gallery_id)
+            if pdf_bytes and r2_client:
+                pdf_key = f"galleries/{gallery_id}/full.pdf"
+                try:
+                    r2_client.put_object(
+                        Bucket=R2_BUCKET_NAME,
+                        Key=pdf_key,
+                        Body=pdf_bytes,
+                        ContentType='application/pdf',
+                        CacheControl='public, max-age=31536000'
+                    )
+                    data['pdf_url'] = f"{R2_PUBLIC_URL.rstrip('/')}/{pdf_key}"
+                    logger.info(f"PDF created and uploaded successfully: {data['pdf_url']}")
+                    
+                    # Update cache with PDF URL
+                    gallery_cache.set(gallery_id, data)
+                    PROCESSING_STATUS[gallery_id] = "completed"
+                except Exception as e:
+                    logger.error(f"Failed to upload PDF to R2: {str(e)}")
+                    PROCESSING_STATUS[gallery_id] = "failed"
+            else:
+                logger.error("PDF creation returned None")
+                PROCESSING_STATUS[gallery_id] = "failed"
+    except Exception as e:
+        logger.error(f"Background PDF processing failed: {str(e)}")
+        PROCESSING_STATUS[gallery_id] = "failed"
+    finally:
+        # Cleanup status after some time
+        def cleanup_status():
+            time.sleep(3600)  # Keep status for 1 hour
+            PROCESSING_STATUS.pop(gallery_id, None)
+        threading.Thread(target=cleanup_status).start()
+
+def process_gallery_images(data: Dict, gallery_id: str, process_pdf: bool = True) -> Dict:
+    """Process gallery images and optionally start PDF creation"""
     try:
         logger.info(f"Processing gallery {gallery_id}")
         
@@ -312,107 +385,33 @@ def process_gallery_images(data: Dict, gallery_id: str) -> Dict:
             total_pages = len(data['images']['pages'])
             logger.info(f"Processing {total_pages} pages")
             
-            # If R2 is available, check if PDF exists first
-            if r2_client:
-                # Check if PDF already exists
-                existing_pdf_url = check_pdf_exists(gallery_id)
-                if existing_pdf_url:
-                    logger.info("PDF already exists, skipping creation")
-                    data['pdf_url'] = existing_pdf_url
-                else:
-                    try:
-                        cf_session = cfSession(directory=cfDirectory(CACHE_DIR), headless_mode=True)
-                        cf_session.get(WEB_TARGET, verify=False, timeout=10)
-                        
-                        # Test download of first page
-                        first_page = data['images']['pages'][0]
-                        if 'url' in first_page:
-                            url = first_page['url']
-                            if url.startswith('https://t'):
-                                url = url.replace('//t', '//i', 1)
-                            img_bytes = download_image(url, cf_session)
-                            if not img_bytes:
-                                logger.error("Failed to download first page")
-                                data['pdf_error'] = "Failed to download test page"
-                                # Process CDN URLs and return early
-                                for page in data['images']['pages']:
-                                    if r2_client and 'media_id' in data:
-                                        if 'url' in page:
-                                            page['cdn_url'] = get_cdn_url(page['url'], data['media_id'])
-                                        if 'thumbnail' in page:
-                                            page['thumbnail_cdn'] = get_cdn_url(page['thumbnail'], data['media_id'])
-                                return data
-                            
-                            logger.info("First page download successful")
-                            image_bytes = [img_bytes]
-                            failed_pages = []
-                            
-                            # Process remaining pages
-                            for i, page in enumerate(data['images']['pages'][1:], 2):
-                                if 'url' in page:
-                                    url = page['url']
-                                    if url.startswith('https://t'):
-                                        url = url.replace('//t', '//i', 1)
-                                    img_bytes = download_image(url, cf_session)
-                                    if img_bytes:
-                                        image_bytes.append(img_bytes)
-                                    else:
-                                        logger.error(f"Failed to download page {i}")
-                                        failed_pages.append(i)
-                                time.sleep(2)
-                            
-                            if failed_pages:
-                                logger.warning(f"Failed to download pages: {failed_pages}")
-                                data['failed_pages'] = failed_pages
-                            
-                            if image_bytes:
-                                logger.info("Creating PDF")
-                                pdf_bytes = create_pdf_from_images(image_bytes, gallery_id)
-                                if pdf_bytes:
-                                    pdf_key = f"galleries/{gallery_id}/full.pdf"
-                                    try:
-                                        logger.info(f"Uploading PDF to R2 with key: {pdf_key}, size: {len(pdf_bytes)} bytes")
-                                        upload_response = r2_client.put_object(
-                                            Bucket=R2_BUCKET_NAME,
-                                            Key=pdf_key,
-                                            Body=pdf_bytes,
-                                            ContentType='application/pdf',
-                                            CacheControl='public, max-age=31536000'
-                                        )
-                                        logger.info(f"R2 upload response: {upload_response}")
-                                        
-                                        # Verify the upload by trying to get the object
-                                        try:
-                                            r2_client.head_object(Bucket=R2_BUCKET_NAME, Key=pdf_key)
-                                            logger.info("Successfully verified PDF in R2")
-                                            data['pdf_url'] = f"{R2_PUBLIC_URL.rstrip('/')}/{pdf_key}"
-                                            logger.info(f"PDF created and uploaded successfully: {data['pdf_url']}")
-                                        except Exception as e:
-                                            logger.error(f"Failed to verify PDF in R2: {str(e)}")
-                                            data['pdf_error'] = "Failed to verify PDF in storage"
-                                            
-                                    except Exception as e:
-                                        logger.error(f"Failed to upload PDF to R2: {str(e)}")
-                                        data['pdf_error'] = "Failed to upload PDF to storage"
-                                else:
-                                    logger.error("PDF creation returned None")
-                                    data['pdf_error'] = "Failed to create PDF"
-                    except Exception as e:
-                        logger.error(f"PDF creation failed: {str(e)}")
-                        data['pdf_error'] = "Failed to create PDF"
-            
             # Process individual pages
             for page in data['images']['pages']:
-                if r2_client and 'media_id' in data:
-                    if 'url' in page:
+                if 'url' in page:
+                    url = page['url']
+                    if url.startswith('https://t'):
+                        page['url'] = url.replace('//t', '//i', 1)
+                    if r2_client and 'media_id' in data:
                         page['cdn_url'] = get_cdn_url(page['url'], data['media_id'])
-                    if 'thumbnail' in page:
+                if 'thumbnail' in page:
+                    if r2_client and 'media_id' in data:
                         page['thumbnail_cdn'] = get_cdn_url(page['thumbnail'], data['media_id'])
+            
+            # Start PDF processing in background if requested
+            if process_pdf and r2_client:
+                # Check if PDF exists first
+                existing_pdf_url = check_pdf_exists(gallery_id)
+                if existing_pdf_url:
+                    logger.info("PDF already exists")
+                    data['pdf_url'] = existing_pdf_url
                 else:
-                    if 'thumbnail' in page:
-                        page['thumbnail'] = page.get('thumbnail', '')
-                    if 'url' in page:
-                        page['url'] = page.get('url', '')
+                    # Check if already processing
+                    if gallery_id in PROCESSING_STATUS:
+                        data['pdf_status'] = PROCESSING_STATUS[gallery_id]
+                    else:
+                        # Start background processing
+                        PDF_PROCESSING_EXECUTOR.submit(process_pdf_in_background, data.copy(), gallery_id)
+                        data['pdf_status'] = "processing"
         
         return data
     except Exception as e:
@@ -491,6 +490,7 @@ class GalleryCache:
         self.cache_dir = cache_dir
         logger.info(f"Initializing gallery cache at: {cache_dir}")
         os.makedirs(cache_dir, exist_ok=True)
+        self.lock = threading.Lock()
     
     def _get_cache_path(self, gallery_id: int) -> str:
         path = os.path.join(self.cache_dir, f"{gallery_id}.json")
@@ -501,53 +501,85 @@ class GalleryCache:
         """Get gallery data from cache if it exists and is not expired"""
         cache_path = self._get_cache_path(gallery_id)
         logger.info(f"Checking cache for gallery {gallery_id} at {cache_path}")
-        try:
-            if os.path.exists(cache_path):
-                with open(cache_path, 'r', encoding='utf-8') as f:
-                    cached_data = json.load(f)
-                    # Check if cache is expired
-                    if time.time() - cached_data['cached_at'] < CACHE_DURATION:
-                        logger.info(f"Cache hit for gallery {gallery_id}")
-                        return cached_data['data']
-                    else:
-                        logger.info(f"Cache expired for gallery {gallery_id}")
-                        os.remove(cache_path)  # Clean up expired cache
-            logger.info(f"No cache found for gallery {gallery_id}")
-            return None
-        except Exception as e:
-            logger.error(f"Cache read error for gallery {gallery_id}: {str(e)}")
-            return None
+        
+        with self.lock:  # Use lock for thread safety
+            try:
+                if os.path.exists(cache_path):
+                    try:
+                        with open(cache_path, 'r', encoding='utf-8') as f:
+                            cached_data = json.load(f)
+                            # Check if cache is expired
+                            if time.time() - cached_data['cached_at'] < CACHE_DURATION:
+                                logger.info(f"Cache hit for gallery {gallery_id}")
+                                return cached_data['data']
+                            else:
+                                logger.info(f"Cache expired for gallery {gallery_id}")
+                                try:
+                                    os.remove(cache_path)  # Clean up expired cache
+                                except OSError:
+                                    logger.warning(f"Could not remove expired cache file: {cache_path}")
+                    except (json.JSONDecodeError, KeyError) as e:
+                        logger.error(f"Invalid cache data for gallery {gallery_id}: {str(e)}")
+                        try:
+                            os.remove(cache_path)  # Clean up invalid cache
+                        except OSError:
+                            pass
+                        return None
+                logger.info(f"No cache found for gallery {gallery_id}")
+                return None
+            except Exception as e:
+                logger.error(f"Cache read error for gallery {gallery_id}: {str(e)}")
+                return None
     
     def set(self, gallery_id: int, data: Dict):
         """Save gallery data to cache"""
         cache_path = self._get_cache_path(gallery_id)
         logger.info(f"Attempting to cache gallery {gallery_id} at {cache_path}")
-        try:
-            cache_data = {
-                'cached_at': time.time(),
-                'data': data
-            }
-            logger.info(f"Prepared cache data for gallery {gallery_id}")
-            
-            # Ensure directory exists
-            os.makedirs(os.path.dirname(cache_path), exist_ok=True)
-            
-            # Write to a temporary file first
-            temp_path = cache_path + '.tmp'
-            with open(temp_path, 'w', encoding='utf-8') as f:
-                json.dump(cache_data, f, ensure_ascii=False)
-            logger.info(f"Wrote temporary cache file for gallery {gallery_id}")
-            
-            # Rename temp file to final file (atomic operation)
-            os.replace(temp_path, cache_path)
-            logger.info(f"Successfully cached gallery {gallery_id}")
-        except Exception as e:
-            logger.error(f"Cache write error for gallery {gallery_id}: {str(e)}")
-            if os.path.exists(temp_path):
+        
+        with self.lock:  # Use lock for thread safety
+            try:
+                cache_data = {
+                    'cached_at': time.time(),
+                    'data': data
+                }
+                logger.info(f"Prepared cache data for gallery {gallery_id}")
+                
+                # Ensure directory exists
+                os.makedirs(os.path.dirname(cache_path), exist_ok=True)
+                
+                # Write to a temporary file first
+                temp_path = cache_path + '.tmp'
                 try:
-                    os.remove(temp_path)
-                except:
-                    pass
+                    with open(temp_path, 'w', encoding='utf-8') as f:
+                        json.dump(cache_data, f, ensure_ascii=False)
+                    logger.info(f"Wrote temporary cache file for gallery {gallery_id}")
+                    
+                    # On Windows, we need to remove the target file first
+                    if os.path.exists(cache_path):
+                        try:
+                            os.remove(cache_path)
+                        except OSError:
+                            logger.warning(f"Could not remove existing cache file: {cache_path}")
+                    
+                    # Rename temp file to final file (atomic operation)
+                    os.rename(temp_path, cache_path)
+                    logger.info(f"Successfully cached gallery {gallery_id}")
+                finally:
+                    # Clean up temp file if it still exists
+                    if os.path.exists(temp_path):
+                        try:
+                            os.remove(temp_path)
+                        except OSError:
+                            pass
+            except Exception as e:
+                logger.error(f"Cache write error for gallery {gallery_id}: {str(e)}")
+                # Clean up any partial files
+                for path in [temp_path, cache_path]:
+                    if os.path.exists(path):
+                        try:
+                            os.remove(path)
+                        except OSError:
+                            pass
 
 # Initialize session and cookie manager
 try:
@@ -703,12 +735,29 @@ def getdata():
     except TypeError:
         return json_resp({"status": False, "reason": "Code not specified"})
     
+    # Check if PDF processing status is requested
+    check_status = request.args.get('check_status', '').lower() == 'true'
+    if check_status and str(code) in PROCESSING_STATUS:
+        return json_resp({
+            "status": True,
+            "pdf_status": PROCESSING_STATUS[str(code)]
+        })
+    
     # Check cache first
     cached_data = gallery_cache.get(code)
     if cached_data:
-        logger.info(f"Found cached data for gallery {code}, verifying R2 URLs")
-        verified_data = verify_cached_data(cached_data)
-        return json_resp(verified_data, status=200)
+        logger.info(f"Found cached data for gallery {code}")
+        # If PDF URL exists in cache, return it
+        if 'pdf_url' in cached_data:
+            return json_resp(cached_data, status=200)
+        # If no PDF URL but processing is ongoing, add status
+        if str(code) in PROCESSING_STATUS:
+            cached_data['pdf_status'] = PROCESSING_STATUS[str(code)]
+        # Otherwise, trigger PDF processing
+        elif r2_client:
+            PDF_PROCESSING_EXECUTOR.submit(process_pdf_in_background, cached_data.copy(), str(code))
+            cached_data['pdf_status'] = "processing"
+        return json_resp(cached_data, status=200)
     
     # Retry logic for gallery fetch
     max_retries = 2
@@ -725,6 +774,9 @@ def getdata():
             logger.info(f"Got response for gallery {code}: status={status}")
             
             if status == 200:  # Successful response
+                # Process images and start PDF creation in background
+                data = process_gallery_images(data, str(code), process_pdf=True)
+                # Cache the initial response
                 gallery_cache.set(code, data)
                 return json_resp(data, status=200)
             else:
@@ -733,13 +785,50 @@ def getdata():
         except Exception as e:
             if attempt < max_retries - 1:
                 continue
+            logger.error(f"Gallery fetch failed for ID {code}: {str(e)}")
             return json_resp({"status": False, "reason": f"Error: {str(e)}"}, status=500)
     
     return json_resp({"status": False, "reason": "Maximum retries exceeded"}, status=500)
 
+@app.route("/pdf-status/<int:code>", methods=["GET"])
+def check_pdf_status(code):
+    """Check PDF processing status for a gallery"""
+    try:
+        if str(code) in PROCESSING_STATUS:
+            return json_resp({
+                "status": True,
+                "pdf_status": PROCESSING_STATUS[str(code)]
+            })
+        
+        # Check if PDF exists
+        if r2_client:
+            pdf_url = check_pdf_exists(str(code))
+            if pdf_url:
+                return json_resp({
+                    "status": True,
+                    "pdf_status": "completed",
+                    "pdf_url": pdf_url
+                })
+        
+        return json_resp({
+            "status": True,
+            "pdf_status": "not_started"
+        })
+    except Exception as e:
+        logger.error(f"Failed to check PDF status: {str(e)}")
+        return json_resp({
+            "status": False,
+            "reason": f"Error checking status: {str(e)}"
+        }, status=500)
+
 @app.errorhandler(404)
 def notFound(e):
     return json_resp({"code": 404, "status": "You are lost"}, status=404)
+
+@app.route("/docs")
+def api_docs():
+    """Serve the API documentation"""
+    return send_from_directory('docs', 'swagger.html')
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5001))
