@@ -9,12 +9,13 @@ RUN apt-get update && apt-get install -y \
     zlib1g-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# Install specific version of Chrome (131.0.6778.204)
-RUN wget -q -O - https://dl-ssl.google.com/linux/linux_signing_key.pub | apt-key add - \
-    && echo "deb [arch=amd64] http://dl.google.com/linux/chrome/deb/ stable main" >> /etc/apt/sources.list.d/google.list \
+# Install Chrome using the recommended approach
+RUN wget -q -O /tmp/chrome.key https://dl-ssl.google.com/linux/linux_signing_key.pub \
+    && install -D /tmp/chrome.key /etc/apt/keyrings/google-chrome.gpg \
+    && echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/google-chrome.gpg] http://dl.google.com/linux/chrome/deb/ stable main" > /etc/apt/sources.list.d/google-chrome.list \
+    && rm /tmp/chrome.key \
     && apt-get update \
-    && apt-get install -y google-chrome-stable=131.0.6778.204-1 \
-    && apt-mark hold google-chrome-stable \
+    && apt-get install -y google-chrome-stable \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -33,10 +34,9 @@ RUN python generate_swagger_ui.py
 
 # Use PORT environment variable from Render.com
 ENV PORT=5000
-# Update Chrome paths and version
+# Update Chrome paths
 ENV CHROME_BIN=/usr/bin/google-chrome
 ENV CHROME_PATH=/usr/bin/google-chrome
-ENV CHROME_VERSION=131.0.6778.204
 ENV NO_SANDBOX=true
 ENV DISPLAY=:99
 
