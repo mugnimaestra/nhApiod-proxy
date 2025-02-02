@@ -588,9 +588,17 @@ class GalleryCache:
                         except OSError:
                             pass
 
+# Import browser configuration
+from browser_config import get_chrome_options
+
 # Initialize session and cookie manager
 try:
-    session = cfSession(directory=cfDirectory(CACHE_DIR), headless_mode=True)
+    chrome_options = get_chrome_options()
+    session = cfSession(
+        directory=cfDirectory(CACHE_DIR),
+        headless_mode=True,
+        browser_options=chrome_options
+    )
     cookie_manager = CookieManager(session, WEB_TARGET)
     gallery_cache = GalleryCache(GALLERY_CACHE_DIR)
     

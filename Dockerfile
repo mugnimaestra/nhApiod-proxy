@@ -1,12 +1,20 @@
 FROM python:3.9-slim
 
-# Install system dependencies required for headless operation and image processing
+# Install dependencies for Chrome
 RUN apt-get update && apt-get install -y \
-    chromium \
-    chromium-driver \
+    wget \
+    gnupg2 \
     xvfb \
     libjpeg-dev \
     zlib1g-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install specific version of Chrome (131.0.6778.204)
+RUN wget -q -O - https://dl-ssl.google.com/linux/linux_signing_key.pub | apt-key add - \
+    && echo "deb [arch=amd64] http://dl.google.com/linux/chrome/deb/ stable main" >> /etc/apt/sources.list.d/google.list \
+    && apt-get update \
+    && apt-get install -y google-chrome-stable=131.0.6778.204-1 \
+    && apt-mark hold google-chrome-stable \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -25,10 +33,10 @@ RUN python generate_swagger_ui.py
 
 # Use PORT environment variable from Render.com
 ENV PORT=5000
-# Set Chrome to run in no-sandbox mode (required for containerized environment)
-ENV CHROME_BIN=/usr/bin/chromium
-ENV CHROME_PATH=/usr/lib/chromium/
-ENV CHROME_DRIVER_PATH=/usr/bin/chromedriver
+# Update Chrome paths and version
+ENV CHROME_BIN=/usr/bin/google-chrome
+ENV CHROME_PATH=/usr/bin/google-chrome
+ENV CHROME_VERSION=131.0.6778.204
 ENV NO_SANDBOX=true
 ENV DISPLAY=:99
 
@@ -46,4 +54,4 @@ USER myuser
 EXPOSE $PORT
 
 # Use gunicorn with proper settings for production
-CMD xvfb-run --server-args="-screen 0 1280x1024x24" gunicorn --bind 0.0.0.0:$PORT --workers 2 --threads 4 --timeout 120 wbs-apiod:app 
+CMD xvfb-run --server-args="-screen 0 1280x1024x24" gunicorn --bind 0.0.0.0:$PORT --workers 2 --threads 4 --timeout 120 wbs-apiod:app
