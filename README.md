@@ -1,95 +1,131 @@
-# nh-apiod-proxy
+# nhApiod-proxy
 
-A web API proxy designed to bypass firewall limitations by utilizing CFSession. This proxy provides enhanced functionality including PDF generation and CDN caching capabilities.
+A high-performance proxy service for nhentai with PDF generation capabilities and CDN support.
 
 ## Features
 
-- Bypass common firewall restrictions using CFSession
-- Automatic PDF generation for galleries
-- CDN caching for improved performance
-- Gallery data caching
-- Cloudflare R2 storage integration
-- Rate limiting and cookie management
-- Efficient image processing
+- 🚀 High-performance gallery data fetching
+- 📄 Automatic PDF generation with background processing
+- 💾 Intelligent caching system
+- ☁️ Optional R2 storage integration for CDN delivery
+- 🔒 Cloudflare challenge handling
+- 🌐 RESTful API with OpenAPI documentation
+
+## Architecture
+
+The application follows a clean architecture pattern with the following components:
+
+```
+src/
+├── api/              # API routes and response handling
+├── config/           # Configuration management
+├── core/             # Core components (cache, cookies)
+├── services/         # Business logic services
+└── utils/           # Utility functions
+```
+
+### Key Components
+
+- **Gallery Service**: Handles gallery data fetching and processing
+- **PDF Service**: Manages PDF generation and status tracking
+- **Storage Service**: Handles R2 storage operations (optional)
+- **Cache System**: Efficient gallery data caching
+- **Cookie Manager**: Handles session management and Cloudflare challenges
 
 ## Setup
 
 ### Prerequisites
 
-- Python 3.9+
-- Virtual environment (recommended)
-- Cloudflare R2 account (for storage features)
+- Python 3.8+
+- virtualenv (recommended)
+- R2 Storage (optional)
 
 ### Installation
 
 1. Clone the repository:
-```bash
-git clone https://github.com/yourusername/nh-apiod-proxy.git
-cd nh-apiod-proxy
-```
+   ```bash
+   git clone https://github.com/yourusername/nhApiod-proxy.git
+   cd nhApiod-proxy
+   ```
 
 2. Create and activate virtual environment:
-```bash
-python -m venv venv
-source venv/bin/activate  # On Windows: venv\Scripts\activate
-```
+   ```bash
+   python -m venv venv
+   source venv/bin/activate  # On Windows: venv\Scripts\activate
+   ```
 
 3. Install dependencies:
-```bash
-pip install -r requirements.txt
-```
+   ```bash
+   pip install -r requirements.txt
+   ```
 
-4. Create `.env` file with your R2 configuration:
+4. Configure environment variables:
+   ```bash
+   cp .env.example .env
+   # Edit .env with your settings
+   ```
+
+### Configuration
+
+The following environment variables are supported:
+
 ```env
+PORT=5001                      # Application port
+DEBUG=false                    # Debug mode
+CLOUDSCRAPER_DELAY=0.1        # Delay between requests
+CLOUDSCRAPER_RETRIES=3        # Max retry attempts
+
+# R2 Storage (optional)
 CF_ACCOUNT_ID=your_account_id
-R2_ACCESS_KEY_ID=your_access_key_id
-R2_SECRET_ACCESS_KEY=your_secret_access_key
-R2_BUCKET_NAME=your_bucket_name
+R2_ACCESS_KEY_ID=your_key_id
+R2_SECRET_ACCESS_KEY=your_secret
+R2_BUCKET_NAME=your_bucket
 R2_PUBLIC_URL=your_public_url
 ```
 
 ## Usage
 
-Start the server:
-```bash
-python wbs-apiod.py
-```
+### Running the Application
 
-The API will be available at `http://localhost:5001`
+```bash
+python -m src.app
+```
 
 ### API Endpoints
 
-- `GET /get?id={gallery_id}`: Fetch gallery data and generate PDF
-  - Returns JSON with gallery metadata
-  - Includes CDN URLs for images if R2 is configured
-  - Generates and caches PDF for future requests
+- `GET /health-check` - Service health check
+- `GET /get?id={gallery_id}` - Get gallery data
+- `GET /pdf-status/{gallery_id}` - Check PDF generation status
+- `GET /docs` - API documentation
 
-## Features in Detail
+### API Documentation
 
-### PDF Generation
-- Automatic PDF creation from gallery images
-- Cached in R2 storage for future requests
-- High-quality image processing
+The API documentation is available at `/docs` when the service is running. The OpenAPI specification is available at `/openapi.json`.
 
-### CDN Integration
-- Images are cached in Cloudflare R2
-- Improved load times and reduced bandwidth
-- Automatic URL conversion for optimal access
+## Development
 
-### Caching System
-- Gallery data caching
-- PDF caching
-- Configurable cache duration
+### Running Tests
 
-### Error Handling
-- Robust retry mechanism
-- Graceful fallbacks
-- Detailed logging
+```bash
+pytest
+```
+
+### Code Style
+
+The project follows PEP 8 guidelines. Use `black` for code formatting:
+
+```bash
+black src/
+```
 
 ## Contributing
 
-Contributions are welcome! Please feel free to submit pull requests.
+1. Fork the repository
+2. Create your feature branch (`git checkout -b feature/amazing-feature`)
+3. Commit your changes (`git commit -m 'Add amazing feature'`)
+4. Push to the branch (`git push origin feature/amazing-feature`)
+5. Open a Pull Request
 
 ## License
 
-This project is licensed under the MIT License - see the LICENSE file for details.
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.

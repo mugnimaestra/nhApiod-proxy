@@ -1,303 +1,240 @@
 openapi: 3.0.3
 info:
   title: nhApiod-proxy API
-  description: API for fetching and caching gallery data with PDF generation
+  description: |
+    A high-performance proxy service for nhentai with PDF generation capabilities and CDN support.
+
+    ## Features
+    - High-performance gallery data fetching
+    - Automatic PDF generation with background processing
+    - Intelligent caching system
+    - Optional R2 storage integration for CDN delivery
   version: 1.0.0
+  contact:
+    name: GitHub Repository
+    url: https://github.com/yourusername/nhApiod-proxy
+
 servers:
   - url: http://localhost:5001
-    description: Local development server (default)
-  - url: https://nhApiod-proxy.onrender.com
-    description: Production server on Render
-  - url: {$API_URL}
-    description: Environment-configured server
+    description: Local development server
+
 paths:
-  /get:
+  /health-check:
     get:
-      summary: Get gallery data
-      description: Fetches gallery data including images and PDF status
-      parameters:
-        - name: id
-          in: query
-          required: true
-          schema:
-            type: integer
-          description: Gallery ID to fetch
-          example: 546408
+      summary: Check service health
+      description: Returns the health status of the service and its components
+      operationId: healthCheck
+      tags:
+        - System
       responses:
-        '200':
-          description: Successful response
+        "200":
+          description: Service health status
           content:
             application/json:
               schema:
-                oneOf:
-                  - $ref: '#/components/schemas/GalleryData'
-                  - $ref: '#/components/schemas/ApiErrorResponse'
-              example:
-                id: 546408
-                media_id: "3174462"
-                title:
-                  english: "[Example] Title [English]"
-                  japanese: "[例] タイトル"
-                  pretty: "Title"
-                images:
-                  pages:
-                    - t: "w"
-                      w: 1280
-                      h: 1804
-                      thumbnail: "https://t1.nhentai.net/galleries/3174462/1t.webp"
-                      url: "https://i1.nhentai.net/galleries/3174462/1.webp"
-                      cdn_url: "https://your-cdn.com/galleries/3174462/1.webp"
-                      thumbnail_cdn: "https://your-cdn.com/galleries/3174462/1t.webp"
-                  cover:
-                    t: "w"
-                    w: 350
-                    h: 494
-                  thumbnail:
-                    t: "w"
-                    w: 250
-                    h: 352
-                scanlator: ""
-                upload_date: 1735464041
-                tags:
-                  - id: 1234
-                    type: "tag"
-                    name: "example"
-                    url: "/tag/example/"
-                    count: 1000
-                num_pages: 58
-                num_favorites: 8509
-                pdf_status: "processing"
-        '404':
+                $ref: "#/components/schemas/HealthCheckResponse"
+        "500":
+          description: Service health check failed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /get:
+    get:
+      summary: Get gallery data
+      description: Fetches gallery data and optionally triggers PDF generation
+      operationId: getGallery
+      tags:
+        - Gallery
+      parameters:
+        - name: id
+          in: query
+          description: Gallery ID
+          required: true
+          schema:
+            type: integer
+            format: int64
+        - name: check_status
+          in: query
+          description: Only check PDF processing status
+          required: false
+          schema:
+            type: boolean
+            default: false
+      responses:
+        "200":
+          description: Gallery data retrieved successfully
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GalleryResponse"
+        "400":
+          description: Invalid gallery ID
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
           description: Gallery not found
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/ApiErrorResponse'
-        '500':
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
           description: Server error
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/ApiErrorResponse'
+                $ref: "#/components/schemas/ErrorResponse"
 
   /pdf-status/{gallery_id}:
     get:
-      summary: Check PDF generation status
-      description: Get the current status of PDF generation for a gallery
+      summary: Check PDF processing status
+      description: Returns the current status of PDF generation for a gallery
+      operationId: getPdfStatus
+      tags:
+        - PDF
       parameters:
         - name: gallery_id
           in: path
+          description: Gallery ID
           required: true
           schema:
             type: integer
-          description: Gallery ID to check PDF status
-          example: 546408
+            format: int64
       responses:
-        '200':
-          description: PDF status response
+        "200":
+          description: PDF status retrieved successfully
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/PdfStatusResponse'
-              example:
-                status: true
-                pdf_status: "completed"
-                pdf_url: "https://your-cdn.com/galleries/546408/full.pdf"
-
-  /health-check:
-    get:
-      summary: Check API health
-      description: Check if the API is running and cookies are valid
-      responses:
-        '200':
-          description: Health check response
+                $ref: "#/components/schemas/PDFStatusResponse"
+        "404":
+          description: Gallery not found
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/HealthCheckResponse'
-              example:
-                status: true
-                service: "nhApiod-proxy"
-                timestamp: 1704096000
-                cookies_ok: true
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
 
 components:
   schemas:
-    GalleryTitle:
-      type: object
-      properties:
-        english:
-          type: string
-        japanese:
-          type: string
-        pretty:
-          type: string
-      required:
-        - english
-        - japanese
-        - pretty
-
-    GalleryImage:
-      type: object
-      properties:
-        t:
-          type: string
-          description: Image type (e.g., 'w' for webp)
-        w:
-          type: integer
-          description: Width in pixels
-        h:
-          type: integer
-          description: Height in pixels
-        thumbnail:
-          type: string
-          description: Thumbnail URL
-        url:
-          type: string
-          description: Full image URL
-        cdn_url:
-          type: string
-          description: R2 CDN URL if available
-        thumbnail_cdn:
-          type: string
-          description: R2 CDN thumbnail URL if available
-      required:
-        - t
-        - w
-        - h
-
-    GalleryImages:
-      type: object
-      properties:
-        pages:
-          type: array
-          items:
-            $ref: '#/components/schemas/GalleryImage'
-        cover:
-          $ref: '#/components/schemas/GalleryImage'
-        thumbnail:
-          $ref: '#/components/schemas/GalleryImage'
-      required:
-        - pages
-        - cover
-        - thumbnail
-
-    GalleryTag:
-      type: object
-      properties:
-        id:
-          type: integer
-        type:
-          type: string
-          enum: [tag, category, artist, parody, language]
-        name:
-          type: string
-        url:
-          type: string
-        count:
-          type: integer
-      required:
-        - id
-        - type
-        - name
-        - url
-        - count
-
-    GalleryData:
-      type: object
-      properties:
-        id:
-          type: integer
-        media_id:
-          type: string
-        title:
-          $ref: '#/components/schemas/GalleryTitle'
-        images:
-          $ref: '#/components/schemas/GalleryImages'
-        scanlator:
-          type: string
-        upload_date:
-          type: integer
-        tags:
-          type: array
-          items:
-            $ref: '#/components/schemas/GalleryTag'
-        num_pages:
-          type: integer
-        num_favorites:
-          type: integer
-        pdf_url:
-          type: string
-          description: Present when PDF is ready
-        pdf_status:
-          type: string
-          enum: [processing, completed, failed, unavailable, not_requested, error]
-          description: |
-            PDF generation status:
-            * processing - PDF is being generated
-            * completed - PDF is ready and available
-            * failed - PDF generation failed
-            * unavailable - R2 storage not configured
-            * not_requested - PDF generation not requested
-            * error - Error during gallery processing
-        failed_pages:
-          type: array
-          items:
-            type: integer
-          description: List of page numbers that failed to download
-      required:
-        - id
-        - media_id
-        - title
-        - images
-        - scanlator
-        - upload_date
-        - tags
-        - num_pages
-        - num_favorites
-
-    ApiErrorResponse:
-      type: object
-      properties:
-        status:
-          type: boolean
-          enum: [false]
-        reason:
-          type: string
-      required:
-        - status
-        - reason
-
-    PdfStatusResponse:
-      type: object
-      properties:
-        status:
-          type: boolean
-          enum: [true]
-        pdf_status:
-          type: string
-          enum: [not_started, processing, completed, failed]
-        pdf_url:
-          type: string
-          description: Present when status is "completed"
-      required:
-        - status
-        - pdf_status
-
     HealthCheckResponse:
       type: object
-      properties:
-        status:
-          type: boolean
-          enum: [true]
-        service:
-          type: string
-        timestamp:
-          type: integer
-        cookies_ok:
-          type: boolean
       required:
         - status
         - service
         - timestamp
-        - cookies_ok 
+        - cookies_ok
+      properties:
+        status:
+          type: boolean
+          description: Overall status of the response
+        service:
+          type: string
+          description: Service name
+        timestamp:
+          type: number
+          format: float
+          description: Current timestamp
+        cookies_ok:
+          type: boolean
+          description: Cookie manager status
+
+    GalleryResponse:
+      type: object
+      required:
+        - status
+      properties:
+        status:
+          type: boolean
+          description: Success status of the request
+        data:
+          type: object
+          description: Gallery data
+          properties:
+            id:
+              type: integer
+              description: Gallery ID
+            media_id:
+              type: string
+              description: Media ID
+            images:
+              type: object
+              properties:
+                cover:
+                  $ref: "#/components/schemas/ImageInfo"
+                pages:
+                  type: array
+                  items:
+                    $ref: "#/components/schemas/ImageInfo"
+            pdf_status:
+              type: string
+              enum: [unavailable, processing, completed, error]
+              description: PDF generation status
+            pdf_url:
+              type: string
+              description: URL to the generated PDF (if available)
+
+    PDFStatusResponse:
+      type: object
+      required:
+        - status
+        - pdf_status
+      properties:
+        status:
+          type: boolean
+          description: Success status of the request
+        pdf_status:
+          type: string
+          enum: [not_started, processing, completed, error]
+          description: Current PDF processing status
+        pdf_url:
+          type: string
+          description: URL to the generated PDF (if completed)
+        error:
+          type: string
+          description: Error message (if status is error)
+
+    ImageInfo:
+      type: object
+      properties:
+        url:
+          type: string
+          description: Original image URL
+        cdn_url:
+          type: string
+          description: CDN URL (if R2 storage is configured)
+        thumbnail:
+          type: string
+          description: Thumbnail URL
+        thumbnail_cdn:
+          type: string
+          description: CDN thumbnail URL (if R2 storage is configured)
+
+    ErrorResponse:
+      type: object
+      required:
+        - status
+        - reason
+      properties:
+        status:
+          type: boolean
+          description: Always false for error responses
+        reason:
+          type: string
+          description: Error message
+
+tags:
+  - name: System
+    description: System-related operations
+  - name: Gallery
+    description: Gallery data operations
+  - name: PDF
+    description: PDF generation operations
